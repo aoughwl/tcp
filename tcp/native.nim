@@ -27,6 +27,8 @@ when defined(windows):
     SOL_SOCKET = 0xffff.cint
     SO_REUSEADDR = 4.cint
     SO_KEEPALIVE = 8.cint
+    SO_SNDTIMEO = 0x1005.cint
+    SO_RCVTIMEO = 0x1006.cint
     TCP_NODELAY = 1.cint
     SD_RECEIVE = 0.cint
     SD_SEND = 1.cint
@@ -93,6 +95,9 @@ else:
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+    TimeVal {.importc: "struct timeval", header: "<sys/time.h>".} = object
+      tv_sec*: clong
+      tv_usec*: clong
 
     TcpEndpoint* = object
       address*: uint32
@@ -106,6 +111,8 @@ else:
     SOL_SOCKET = 1.cint
     SO_REUSEADDR = 2.cint
     SO_KEEPALIVE = 9.cint
+    SO_SNDTIMEO = 21.cint
+    SO_RCVTIMEO = 20.cint
     TCP_NODELAY = 1.cint
     SHUT_RD = 0.cint
     SHUT_WR = 1.cint
@@ -234,6 +241,18 @@ proc setTcpBoolOpt(fd: TcpHandle; level, optname: cint; enabled: bool): bool =
   else:
     result = setsockopt(fd, level, optname, addr flag, SockLen(sizeof(flag))) == 0
 
+proc setTcpMillisOpt(fd: TcpHandle; optname: cint; millis: int): bool =
+  if fd == InvalidTcpHandle or millis < 0:
+    return false
+  when defined(windows):
+    var timeout = millis.cint
+    result = setsockopt(fd, SOL_SOCKET, optname, addr timeout, cint(sizeof(timeout))) == 0
+  else:
+    var timeout = default(TimeVal)
+    timeout.tv_sec = clong(millis div 1000)
+    timeout.tv_usec = clong((millis mod 1000) * 1000)
+    result = setsockopt(fd, SOL_SOCKET, optname, addr timeout, SockLen(sizeof(timeout))) == 0
+
 proc setTcpNoDelay*(fd: TcpHandle; enabled = true): bool =
   ## Enable or disable TCP_NODELAY for latency-sensitive small writes.
   setTcpBoolOpt(fd, IPPROTO_TCP, TCP_NODELAY, enabled)
@@ -241,6 +260,20 @@ proc setTcpNoDelay*(fd: TcpHandle; enabled = true): bool =
 proc setTcpKeepAlive*(fd: TcpHandle; enabled = true): bool =
   ## Enable or disable platform-default TCP keepalive.
   setTcpBoolOpt(fd, SOL_SOCKET, SO_KEEPALIVE, enabled)
+
+proc setTcpReadTimeoutMillis*(fd: TcpHandle; millis: int): bool =
+  ## Bound blocking reads. Pass 0 to restore platform blocking behavior.
+  setTcpMillisOpt(fd, SO_RCVTIMEO, millis)
+
+proc setTcpWriteTimeoutMillis*(fd: TcpHandle; millis: int): bool =
+  ## Bound blocking writes. Pass 0 to restore platform blocking behavior.
+  setTcpMillisOpt(fd, SO_SNDTIMEO, millis)
+
+proc setTcpTimeoutMillis*(fd: TcpHandle; millis: int): bool =
+  ## Apply the same timeout to both reads and writes.
+  if not setTcpReadTimeoutMillis(fd, millis):
+    return false
+  setTcpWriteTimeoutMillis(fd, millis)
 
 proc shutdownTcpRead*(fd: TcpHandle): bool =
   ## Forbid further receives on the socket while keeping the handle open.

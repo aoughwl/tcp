@@ -34,6 +34,7 @@ shutdownTcp()
 | `writeTcp` | write bytes from a caller-owned buffer |
 | `writeAllTcp` | retry short writes until complete or error |
 | `setTcpNoDelay`, `setTcpKeepAlive` | common TCP socket options |
+| `setTcpReadTimeoutMillis`, `setTcpWriteTimeoutMillis`, `setTcpTimeoutMillis` | bound blocking socket I/O |
 | `shutdownTcpRead`, `shutdownTcpWrite`, `shutdownTcpBoth` | half-close or fully shut down socket traffic |
 | `closeTcp` | close a socket handle |
 
