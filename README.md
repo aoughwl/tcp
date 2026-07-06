@@ -23,11 +23,13 @@ shutdownTcp()
 | symbol | role |
 |--------|------|
 | `TcpHandle` | native socket handle |
+| `TcpEndpoint` | IPv4 address and port reported by the socket stack |
 | `InvalidTcpHandle` | invalid socket sentinel |
 | `isValidTcp` | socket handle validity check |
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
 | `acceptTcp` | accept one client |
+| `invalidTcpEndpoint`, `localTcpEndpoint`, `peerTcpEndpoint` | endpoint introspection |
 | `readTcp` | read bytes into a caller-owned buffer |
 | `writeTcp` | write bytes from a caller-owned buffer |
 | `writeAllTcp` | retry short writes until complete or error |

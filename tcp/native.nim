@@ -15,6 +15,10 @@ when defined(windows):
       sin_port*: cushort
       sin_addr*: InAddr
 
+    TcpEndpoint* = object
+      address*: uint32
+      port*: int
+
   const
     InvalidTcpHandle* = not 0'u
     AF_INET = 2.cint
@@ -44,6 +48,10 @@ when defined(windows):
     stdcall, importc: "listen", dynlib: "ws2_32.dll".}
   proc acceptSocket(s: TcpHandle; name: ptr SockAddr; namelen: ptr cint): TcpHandle {.
     stdcall, importc: "accept", dynlib: "ws2_32.dll".}
+  proc getsockname(s: TcpHandle; name: ptr SockAddr; namelen: ptr cint): cint {.
+    stdcall, importc: "getsockname", dynlib: "ws2_32.dll".}
+  proc getpeername(s: TcpHandle; name: ptr SockAddr; namelen: ptr cint): cint {.
+    stdcall, importc: "getpeername", dynlib: "ws2_32.dll".}
   proc recvSocket(s: TcpHandle; buf: pointer; len, flags: cint): cint {.
     stdcall, importc: "recv", dynlib: "ws2_32.dll".}
   proc sendSocket(s: TcpHandle; buf: pointer; len, flags: cint): cint {.
@@ -56,6 +64,10 @@ when defined(windows):
     stdcall, importc: "htons", dynlib: "ws2_32.dll".}
   proc htonl(x: uint32): uint32 {.
     stdcall, importc: "htonl", dynlib: "ws2_32.dll".}
+  proc ntohs(x: cushort): cushort {.
+    stdcall, importc: "ntohs", dynlib: "ws2_32.dll".}
+  proc ntohl(x: uint32): uint32 {.
+    stdcall, importc: "ntohl", dynlib: "ws2_32.dll".}
 
   var tcpStarted = false
 
@@ -81,6 +93,10 @@ else:
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+
+    TcpEndpoint* = object
+      address*: uint32
+      port*: int
 
   const
     InvalidTcpHandle* = -1.cint
@@ -108,6 +124,10 @@ else:
     importc: "listen", header: "<sys/socket.h>".}
   proc acceptSocket(s: TcpHandle; name: ptr SockAddr; namelen: ptr SockLen): TcpHandle {.
     importc: "accept", header: "<sys/socket.h>".}
+  proc getsockname(s: TcpHandle; name: ptr SockAddr; namelen: ptr SockLen): cint {.
+    importc: "getsockname", header: "<sys/socket.h>".}
+  proc getpeername(s: TcpHandle; name: ptr SockAddr; namelen: ptr SockLen): cint {.
+    importc: "getpeername", header: "<sys/socket.h>".}
   proc recvSocket(s: TcpHandle; buf: pointer; len: csize_t; flags: cint): int {.
     importc: "recv", header: "<sys/socket.h>".}
   proc sendSocket(s: TcpHandle; buf: pointer; len: csize_t; flags: cint): int {.
@@ -120,6 +140,10 @@ else:
     importc: "htons", header: "<arpa/inet.h>".}
   proc htonl(x: uint32): uint32 {.
     importc: "htonl", header: "<arpa/inet.h>".}
+  proc ntohs(x: cushort): cushort {.
+    importc: "ntohs", header: "<arpa/inet.h>".}
+  proc ntohl(x: uint32): uint32 {.
+    importc: "ntohl", header: "<arpa/inet.h>".}
 
   proc initTcp*() =
     discard
@@ -159,6 +183,45 @@ proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
 
 proc listenTcp*(port: int; backlog = 128): TcpHandle =
   listenTcp4(INADDR_ANY, port, backlog)
+
+proc invalidTcpEndpoint*(): TcpEndpoint =
+  TcpEndpoint(address: 0'u32, port: -1)
+
+proc endpointFromSockaddr(addr4: SockaddrIn): TcpEndpoint =
+  TcpEndpoint(
+    address: ntohl(addr4.sin_addr.s_addr),
+    port: int(ntohs(addr4.sin_port))
+  )
+
+proc localTcpEndpoint*(fd: TcpHandle): TcpEndpoint =
+  ## Return the socket's bound IPv4 address and port, or an invalid endpoint.
+  if fd == InvalidTcpHandle:
+    return invalidTcpEndpoint()
+  var addr4 = default(SockaddrIn)
+  when defined(windows):
+    var addrLen = cint(sizeof(addr4))
+    if getsockname(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+      return invalidTcpEndpoint()
+  else:
+    var addrLen = SockLen(sizeof(addr4))
+    if getsockname(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+      return invalidTcpEndpoint()
+  endpointFromSockaddr(addr4)
+
+proc peerTcpEndpoint*(fd: TcpHandle): TcpEndpoint =
+  ## Return the connected peer's IPv4 address and port, or an invalid endpoint.
+  if fd == InvalidTcpHandle:
+    return invalidTcpEndpoint()
+  var addr4 = default(SockaddrIn)
+  when defined(windows):
+    var addrLen = cint(sizeof(addr4))
+    if getpeername(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+      return invalidTcpEndpoint()
+  else:
+    var addrLen = SockLen(sizeof(addr4))
+    if getpeername(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+      return invalidTcpEndpoint()
+  endpointFromSockaddr(addr4)
 
 proc setTcpBoolOpt(fd: TcpHandle; level, optname: cint; enabled: bool): bool =
   if fd == InvalidTcpHandle:
