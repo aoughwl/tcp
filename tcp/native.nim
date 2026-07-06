@@ -33,6 +33,8 @@ when defined(windows):
     stdcall, importc: "setsockopt", dynlib: "ws2_32.dll".}
   proc bindSocket(s: TcpHandle; name: ptr SockAddr; namelen: cint): cint {.
     stdcall, importc: "bind", dynlib: "ws2_32.dll".}
+  proc connectSocket(s: TcpHandle; name: ptr SockAddr; namelen: cint): cint {.
+    stdcall, importc: "connect", dynlib: "ws2_32.dll".}
   proc listenSocket(s: TcpHandle; backlog: cint): cint {.
     stdcall, importc: "listen", dynlib: "ws2_32.dll".}
   proc acceptSocket(s: TcpHandle; name: ptr SockAddr; namelen: ptr cint): TcpHandle {.
@@ -45,6 +47,8 @@ when defined(windows):
     stdcall, importc: "closesocket", dynlib: "ws2_32.dll".}
   proc htons(x: cushort): cushort {.
     stdcall, importc: "htons", dynlib: "ws2_32.dll".}
+  proc htonl(x: uint32): uint32 {.
+    stdcall, importc: "htonl", dynlib: "ws2_32.dll".}
 
   var tcpStarted = false
 
@@ -86,6 +90,8 @@ else:
     importc: "setsockopt", header: "<sys/socket.h>".}
   proc bindSocket(s: TcpHandle; name: ptr SockAddr; namelen: SockLen): cint {.
     importc: "bind", header: "<sys/socket.h>".}
+  proc connectSocket(s: TcpHandle; name: ptr SockAddr; namelen: SockLen): cint {.
+    importc: "connect", header: "<sys/socket.h>".}
   proc listenSocket(s: TcpHandle; backlog: cint): cint {.
     importc: "listen", header: "<sys/socket.h>".}
   proc acceptSocket(s: TcpHandle; name: ptr SockAddr; namelen: ptr SockLen): TcpHandle {.
@@ -98,6 +104,8 @@ else:
     importc: "close", header: "<unistd.h>".}
   proc htons(x: cushort): cushort {.
     importc: "htons", header: "<arpa/inet.h>".}
+  proc htonl(x: uint32): uint32 {.
+    importc: "htonl", header: "<arpa/inet.h>".}
 
   proc initTcp*() =
     discard
@@ -133,6 +141,30 @@ proc listenTcp*(port: int; backlog = 128): TcpHandle =
     discard closeSocket(fd)
     return InvalidTcpHandle
   return fd
+
+proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
+  ## Connect to an IPv4 address encoded in host byte order.
+  let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+  if fd == InvalidTcpHandle:
+    return InvalidTcpHandle
+
+  var addr4 = default(SockaddrIn)
+  addr4.sin_family = cushort(AF_INET)
+  addr4.sin_port = htons(cushort(port))
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
+
+  when defined(windows):
+    if connectSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) != 0:
+      discard closeSocket(fd)
+      return InvalidTcpHandle
+  else:
+    if connectSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) != 0:
+      discard closeSocket(fd)
+      return InvalidTcpHandle
+  return fd
+
+proc connectLocalhostTcp*(port: int): TcpHandle =
+  connectTcp4(0x7f000001'u32, port)
 
 proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
   var addr4 = default(SockaddrIn)
