@@ -24,6 +24,9 @@ when defined(windows):
     SO_REUSEADDR = 4.cint
     SO_KEEPALIVE = 8.cint
     TCP_NODELAY = 1.cint
+    SD_RECEIVE = 0.cint
+    SD_SEND = 1.cint
+    SD_BOTH = 2.cint
     INADDR_ANY = 0'u32
 
   proc WSAStartup(wVersionRequested: cushort; lpWSAData: ptr WSAData): cint {.
@@ -45,6 +48,8 @@ when defined(windows):
     stdcall, importc: "recv", dynlib: "ws2_32.dll".}
   proc sendSocket(s: TcpHandle; buf: pointer; len, flags: cint): cint {.
     stdcall, importc: "send", dynlib: "ws2_32.dll".}
+  proc shutdownSocket(s: TcpHandle; how: cint): cint {.
+    stdcall, importc: "shutdown", dynlib: "ws2_32.dll".}
   proc closeSocket(s: TcpHandle): cint {.
     stdcall, importc: "closesocket", dynlib: "ws2_32.dll".}
   proc htons(x: cushort): cushort {.
@@ -86,6 +91,9 @@ else:
     SO_REUSEADDR = 2.cint
     SO_KEEPALIVE = 9.cint
     TCP_NODELAY = 1.cint
+    SHUT_RD = 0.cint
+    SHUT_WR = 1.cint
+    SHUT_RDWR = 2.cint
     INADDR_ANY = 0'u32
 
   proc socket(af, typ, protocol: cint): TcpHandle {.
@@ -104,6 +112,8 @@ else:
     importc: "recv", header: "<sys/socket.h>".}
   proc sendSocket(s: TcpHandle; buf: pointer; len: csize_t; flags: cint): int {.
     importc: "send", header: "<sys/socket.h>".}
+  proc shutdownSocket(s: TcpHandle; how: cint): cint {.
+    importc: "shutdown", header: "<sys/socket.h>".}
   proc closeSocket(s: TcpHandle): cint {.
     importc: "close", header: "<unistd.h>".}
   proc htons(x: cushort): cushort {.
@@ -168,6 +178,33 @@ proc setTcpNoDelay*(fd: TcpHandle; enabled = true): bool =
 proc setTcpKeepAlive*(fd: TcpHandle; enabled = true): bool =
   ## Enable or disable platform-default TCP keepalive.
   setTcpBoolOpt(fd, SOL_SOCKET, SO_KEEPALIVE, enabled)
+
+proc shutdownTcpRead*(fd: TcpHandle): bool =
+  ## Forbid further receives on the socket while keeping the handle open.
+  if fd == InvalidTcpHandle:
+    return false
+  when defined(windows):
+    result = shutdownSocket(fd, SD_RECEIVE) == 0
+  else:
+    result = shutdownSocket(fd, SHUT_RD) == 0
+
+proc shutdownTcpWrite*(fd: TcpHandle): bool =
+  ## Send EOF to the peer while keeping the receive side open.
+  if fd == InvalidTcpHandle:
+    return false
+  when defined(windows):
+    result = shutdownSocket(fd, SD_SEND) == 0
+  else:
+    result = shutdownSocket(fd, SHUT_WR) == 0
+
+proc shutdownTcpBoth*(fd: TcpHandle): bool =
+  ## Forbid further sends and receives while keeping close ownership explicit.
+  if fd == InvalidTcpHandle:
+    return false
+  when defined(windows):
+    result = shutdownSocket(fd, SD_BOTH) == 0
+  else:
+    result = shutdownSocket(fd, SHUT_RDWR) == 0
 
 proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
   ## Connect to an IPv4 address encoded in host byte order.
