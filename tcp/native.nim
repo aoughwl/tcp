@@ -113,7 +113,8 @@ else:
   proc shutdownTcp*() =
     discard
 
-proc listenTcp*(port: int; backlog = 128): TcpHandle =
+proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
+  ## Listen on an IPv4 address encoded in host byte order.
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return InvalidTcpHandle
@@ -126,7 +127,7 @@ proc listenTcp*(port: int; backlog = 128): TcpHandle =
   var addr4 = default(SockaddrIn)
   addr4.sin_family = cushort(AF_INET)
   addr4.sin_port = htons(cushort(port))
-  addr4.sin_addr.s_addr = INADDR_ANY
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
 
   when defined(windows):
     if bindSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) != 0:
@@ -141,6 +142,9 @@ proc listenTcp*(port: int; backlog = 128): TcpHandle =
     discard closeSocket(fd)
     return InvalidTcpHandle
   return fd
+
+proc listenTcp*(port: int; backlog = 128): TcpHandle =
+  listenTcp4(INADDR_ANY, port, backlog)
 
 proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
   ## Connect to an IPv4 address encoded in host byte order.
