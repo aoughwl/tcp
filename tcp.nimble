@@ -1,7 +1,7 @@
 # Package
 version     = "0.1.0"
 author      = "savannt"
-description = "Native blocking TCP primitives for Nimony / Nim."
+description = "Native blocking TCP primitives for Nimony."
 license     = "MIT"
 srcDir      = "."
 

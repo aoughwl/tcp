@@ -1,6 +1,6 @@
 # tcp
 
-Native blocking TCP primitives for Nimony / Nim.
+Native blocking TCP primitives for Nimony.
 
 The package provides a small socket API suitable for building higher-level
 network libraries:
