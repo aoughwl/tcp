@@ -24,11 +24,13 @@ shutdownTcp()
 |--------|------|
 | `TcpHandle` | native socket handle |
 | `InvalidTcpHandle` | invalid socket sentinel |
+| `isValidTcp` | socket handle validity check |
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
 | `listenTcp` | bind and listen on a TCP port |
 | `acceptTcp` | accept one client |
 | `readTcp` | read bytes into a caller-owned buffer |
 | `writeTcp` | write bytes from a caller-owned buffer |
+| `writeAllTcp` | retry short writes until complete or error |
 | `closeTcp` | close a socket handle |
 
 ## Notes

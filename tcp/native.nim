@@ -158,3 +158,15 @@ proc writeTcp*(fd: TcpHandle; buf: pointer; len: int): int =
 proc closeTcp*(fd: TcpHandle) =
   if fd != InvalidTcpHandle:
     discard closeSocket(fd)
+
+proc isValidTcp*(fd: TcpHandle): bool =
+  fd != InvalidTcpHandle
+
+proc writeAllTcp*(fd: TcpHandle; buf: pointer; len: int): int =
+  ## Write up to `len` bytes, retrying short writes until complete or error.
+  result = 0
+  while result < len:
+    let n = writeTcp(fd, cast[pointer](cast[uint](buf) + uint(result)), len - result)
+    if n <= 0:
+      return result
+    result = result + n

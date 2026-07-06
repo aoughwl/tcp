@@ -4,4 +4,5 @@ import tcp
 
 var h = InvalidTcpHandle
 discard h
+discard isValidTcp(h)
 discard sizeof(TcpHandle)
