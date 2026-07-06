@@ -22,6 +22,8 @@ when defined(windows):
     IPPROTO_TCP = 6.cint
     SOL_SOCKET = 0xffff.cint
     SO_REUSEADDR = 4.cint
+    SO_KEEPALIVE = 8.cint
+    TCP_NODELAY = 1.cint
     INADDR_ANY = 0'u32
 
   proc WSAStartup(wVersionRequested: cushort; lpWSAData: ptr WSAData): cint {.
@@ -82,6 +84,8 @@ else:
     IPPROTO_TCP = 6.cint
     SOL_SOCKET = 1.cint
     SO_REUSEADDR = 2.cint
+    SO_KEEPALIVE = 9.cint
+    TCP_NODELAY = 1.cint
     INADDR_ANY = 0'u32
 
   proc socket(af, typ, protocol: cint): TcpHandle {.
@@ -145,6 +149,25 @@ proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
 
 proc listenTcp*(port: int; backlog = 128): TcpHandle =
   listenTcp4(INADDR_ANY, port, backlog)
+
+proc setTcpBoolOpt(fd: TcpHandle; level, optname: cint; enabled: bool): bool =
+  if fd == InvalidTcpHandle:
+    return false
+  var flag: cint = 0
+  if enabled:
+    flag = 1
+  when defined(windows):
+    result = setsockopt(fd, level, optname, addr flag, cint(sizeof(flag))) == 0
+  else:
+    result = setsockopt(fd, level, optname, addr flag, SockLen(sizeof(flag))) == 0
+
+proc setTcpNoDelay*(fd: TcpHandle; enabled = true): bool =
+  ## Enable or disable TCP_NODELAY for latency-sensitive small writes.
+  setTcpBoolOpt(fd, IPPROTO_TCP, TCP_NODELAY, enabled)
+
+proc setTcpKeepAlive*(fd: TcpHandle; enabled = true): bool =
+  ## Enable or disable platform-default TCP keepalive.
+  setTcpBoolOpt(fd, SOL_SOCKET, SO_KEEPALIVE, enabled)
 
 proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
   ## Connect to an IPv4 address encoded in host byte order.

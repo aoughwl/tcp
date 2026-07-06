@@ -31,6 +31,7 @@ shutdownTcp()
 | `readTcp` | read bytes into a caller-owned buffer |
 | `writeTcp` | write bytes from a caller-owned buffer |
 | `writeAllTcp` | retry short writes until complete or error |
+| `setTcpNoDelay`, `setTcpKeepAlive` | common TCP socket options |
 | `closeTcp` | close a socket handle |
 
 ## Notes

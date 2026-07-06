@@ -6,6 +6,8 @@ var h = InvalidTcpHandle
 discard h
 discard isValidTcp(h)
 discard sizeof(TcpHandle)
+discard setTcpNoDelay(h)
+discard setTcpKeepAlive(h)
 let l4: proc(hostOrderAddr: uint32; port: int; backlog: int): TcpHandle = listenTcp4
 let c4: proc(hostOrderAddr: uint32; port: int): TcpHandle = connectTcp4
 let cl: proc(port: int): TcpHandle = connectLocalhostTcp
