@@ -1,6 +1,6 @@
 # tcp
 
-Native blocking TCP primitives for Nimony.
+Native blocking TCP primitives.
 
 The package provides a small socket API suitable for building higher-level
 network libraries:
@@ -27,6 +27,7 @@ shutdownTcp()
 | `InvalidTcpHandle` | invalid socket sentinel |
 | `isValidTcp` | socket handle validity check |
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
+| `lastTcpErrorCode` | last platform socket error code for the current thread |
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
 | `acceptTcp` | accept one client |
 | `invalidTcpEndpoint`, `localTcpEndpoint`, `peerTcpEndpoint` | endpoint introspection |

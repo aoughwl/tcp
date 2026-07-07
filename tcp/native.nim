@@ -38,6 +38,8 @@ when defined(windows):
   proc WSAStartup(wVersionRequested: cushort; lpWSAData: ptr WSAData): cint {.
     stdcall, importc: "WSAStartup", dynlib: "ws2_32.dll".}
   proc WSACleanup(): cint {.stdcall, importc: "WSACleanup", dynlib: "ws2_32.dll".}
+  proc WSAGetLastError(): cint {.
+    stdcall, importc: "WSAGetLastError", dynlib: "ws2_32.dll".}
   proc socket(af, typ, protocol: cint): TcpHandle {.
     stdcall, importc: "socket", dynlib: "ws2_32.dll".}
   proc setsockopt(s: TcpHandle; level, optname: cint; optval: pointer; optlen: cint): cint {.
@@ -83,6 +85,10 @@ when defined(windows):
     if tcpStarted:
       discard WSACleanup()
       tcpStarted = false
+
+  proc lastTcpErrorCode*(): int =
+    ## Return the last platform socket error code for the current thread.
+    WSAGetLastError().int
 
 else:
   type
@@ -152,11 +158,23 @@ else:
   proc ntohl(x: uint32): uint32 {.
     importc: "ntohl", header: "<arpa/inet.h>".}
 
+  when defined(macosx) or defined(freebsd) or defined(openbsd) or defined(netbsd):
+    proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
+  else:
+    proc errnoLocation(): ptr cint {.importc: "__errno_location", header: "<errno.h>".}
+
   proc initTcp*() =
     discard
 
   proc shutdownTcp*() =
     discard
+
+  proc lastTcpErrorCode*(): int =
+    ## Return the last platform socket error code for the current thread.
+    let p = errnoLocation()
+    if p == nil:
+      return 0
+    p[].int
 
 proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
   ## Listen on an IPv4 address encoded in host byte order.

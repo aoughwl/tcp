@@ -5,6 +5,7 @@ import tcp
 var h = InvalidTcpHandle
 discard h
 discard isValidTcp(h)
+discard lastTcpErrorCode()
 discard sizeof(TcpHandle)
 discard setTcpNoDelay(h)
 discard setTcpKeepAlive(h)
