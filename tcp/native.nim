@@ -39,9 +39,19 @@ when defined(windows):
       tcpErrorUnreachable,
       tcpErrorUnknown
 
+    TcpConnectStatus* = enum
+      tcpConnectFailed,
+      tcpConnectInProgress,
+      tcpConnectConnected
+
     TcpEndpoint* = object
       address*: uint32
       port*: int
+
+    TcpConnectResult* = object
+      handle*: TcpHandle
+      status*: TcpConnectStatus
+      errorCode*: int
 
   const
     InvalidTcpHandle* = not 0'u
@@ -53,6 +63,7 @@ when defined(windows):
     SO_KEEPALIVE = 8.cint
     SO_SNDTIMEO = 0x1005.cint
     SO_RCVTIMEO = 0x1006.cint
+    SO_ERROR = 0x1007.cint
     TCP_NODELAY = 1.cint
     SD_RECEIVE = 0.cint
     SD_SEND = 1.cint
@@ -88,6 +99,8 @@ when defined(windows):
     stdcall, importc: "socket", dynlib: "ws2_32.dll".}
   proc setsockopt(s: TcpHandle; level, optname: cint; optval: pointer; optlen: cint): cint {.
     stdcall, importc: "setsockopt", dynlib: "ws2_32.dll".}
+  proc getsockopt(s: TcpHandle; level, optname: cint; optval: pointer; optlen: ptr cint): cint {.
+    stdcall, importc: "getsockopt", dynlib: "ws2_32.dll".}
   proc bindSocket(s: TcpHandle; name: ptr SockAddr; namelen: cint): cint {.
     stdcall, importc: "bind", dynlib: "ws2_32.dll".}
   proc connectSocket(s: TcpHandle; name: ptr SockAddr; namelen: cint): cint {.
@@ -202,20 +215,25 @@ else:
       tcpErrorUnreachable,
       tcpErrorUnknown
 
+    TcpConnectStatus* = enum
+      tcpConnectFailed,
+      tcpConnectInProgress,
+      tcpConnectConnected
+
     TcpEndpoint* = object
       address*: uint32
       port*: int
+
+    TcpConnectResult* = object
+      handle*: TcpHandle
+      status*: TcpConnectStatus
+      errorCode*: int
 
   const
     InvalidTcpHandle* = -1.cint
     AF_INET = 2.cint
     SOCK_STREAM = 1.cint
     IPPROTO_TCP = 6.cint
-    SOL_SOCKET = 1.cint
-    SO_REUSEADDR = 2.cint
-    SO_KEEPALIVE = 9.cint
-    SO_SNDTIMEO = 21.cint
-    SO_RCVTIMEO = 20.cint
     TCP_NODELAY = 1.cint
     SHUT_RD = 0.cint
     SHUT_WR = 1.cint
@@ -231,6 +249,8 @@ else:
     importc: "socket", header: "<sys/socket.h>".}
   proc setsockopt(s: TcpHandle; level, optname: cint; optval: pointer; optlen: SockLen): cint {.
     importc: "setsockopt", header: "<sys/socket.h>".}
+  proc getsockopt(s: TcpHandle; level, optname: cint; optval: pointer; optlen: ptr SockLen): cint {.
+    importc: "getsockopt", header: "<sys/socket.h>".}
   proc bindSocket(s: TcpHandle; name: ptr SockAddr; namelen: SockLen): cint {.
     importc: "bind", header: "<sys/socket.h>".}
   proc connectSocket(s: TcpHandle; name: ptr SockAddr; namelen: SockLen): cint {.
@@ -281,6 +301,12 @@ else:
   var EPIPE {.importc: "EPIPE", header: "<errno.h>".}: cint
   var ECONNREFUSED {.importc: "ECONNREFUSED", header: "<errno.h>".}: cint
   var EHOSTUNREACH {.importc: "EHOSTUNREACH", header: "<errno.h>".}: cint
+  var SOL_SOCKET {.importc: "SOL_SOCKET", header: "<sys/socket.h>".}: cint
+  var SO_REUSEADDR {.importc: "SO_REUSEADDR", header: "<sys/socket.h>".}: cint
+  var SO_KEEPALIVE {.importc: "SO_KEEPALIVE", header: "<sys/socket.h>".}: cint
+  var SO_SNDTIMEO {.importc: "SO_SNDTIMEO", header: "<sys/socket.h>".}: cint
+  var SO_RCVTIMEO {.importc: "SO_RCVTIMEO", header: "<sys/socket.h>".}: cint
+  var SO_ERROR {.importc: "SO_ERROR", header: "<sys/socket.h>".}: cint
   var F_GETFL {.importc: "F_GETFL", header: "<fcntl.h>".}: cint
   var F_SETFL {.importc: "F_SETFL", header: "<fcntl.h>".}: cint
   var O_NONBLOCK {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
@@ -401,6 +427,52 @@ proc pollTcp*(fd: TcpHandle; request: TcpPollRequest; timeoutMillis: int;
   ready.hangup = (pfd.revents and PollHup) != 0
   ready.invalid = (pfd.revents and PollNval) != 0
   n.int
+
+proc waitTcpReadable*(fd: TcpHandle; timeoutMillis: int): bool =
+  var request = TcpPollRequest(read: true, write: false)
+  var ready = default(TcpPollResult)
+  pollTcp(fd, request, timeoutMillis, ready) > 0 and ready.read
+
+proc waitTcpWritable*(fd: TcpHandle; timeoutMillis: int): bool =
+  var request = TcpPollRequest(read: false, write: true)
+  var ready = default(TcpPollResult)
+  pollTcp(fd, request, timeoutMillis, ready) > 0 and ready.write
+
+proc tcpSocketErrorCode*(fd: TcpHandle; errorCode: var int): bool =
+  ## Read the pending SO_ERROR value.
+  if fd == InvalidTcpHandle:
+    errorCode = -1
+    return false
+  var value: cint = 0
+  when defined(windows):
+    var valueLen = cint(sizeof(value))
+    if getsockopt(fd, SOL_SOCKET, SO_ERROR, addr value, addr valueLen) != 0:
+      errorCode = lastTcpErrorCode()
+      return false
+  else:
+    var valueLen = SockLen(sizeof(value))
+    if getsockopt(fd, SOL_SOCKET, SO_ERROR, addr value, addr valueLen) != 0:
+      errorCode = lastTcpErrorCode()
+      return false
+  errorCode = value.int
+  true
+
+proc tcpSocketErrorCode*(fd: TcpHandle): int =
+  ## Return the pending SO_ERROR value, or -1 if it cannot be read.
+  var errorCode = 0
+  if tcpSocketErrorCode(fd, errorCode):
+    return errorCode
+  -1
+
+proc finishTcpConnect*(fd: TcpHandle): bool =
+  ## Check whether a nonblocking connect completed successfully.
+  tcpSocketErrorCode(fd) == 0
+
+proc finishTcpConnect*(fd: TcpHandle; errorCode: var int): bool =
+  ## Check whether a nonblocking connect completed successfully.
+  if not tcpSocketErrorCode(fd, errorCode):
+    return false
+  errorCode == 0
 
 proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
   ## Listen on an IPv4 address encoded in host byte order.
@@ -567,8 +639,44 @@ proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
       return InvalidTcpHandle
   return fd
 
+proc connectTcp4NonBlocking*(hostOrderAddr: uint32; port: int): TcpConnectResult =
+  ## Start a nonblocking IPv4 connect. Poll for writability, then call `finishTcpConnect`.
+  let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+  if fd == InvalidTcpHandle:
+    return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: lastTcpErrorCode())
+  if not setTcpNonBlocking(fd):
+    let code = lastTcpErrorCode()
+    discard closeSocket(fd)
+    return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: code)
+
+  var addr4 = default(SockaddrIn)
+  addr4.sin_family = cushort(AF_INET)
+  addr4.sin_port = htons(cushort(port))
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
+
+  when defined(windows):
+    if connectSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) != 0:
+      let code = lastTcpErrorCode()
+      if tcpErrorWouldRetry(code):
+        return TcpConnectResult(handle: fd, status: tcpConnectInProgress, errorCode: code)
+      else:
+        discard closeSocket(fd)
+        return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: code)
+  else:
+    if connectSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) != 0:
+      let code = lastTcpErrorCode()
+      if tcpErrorWouldRetry(code):
+        return TcpConnectResult(handle: fd, status: tcpConnectInProgress, errorCode: code)
+      else:
+        discard closeSocket(fd)
+        return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: code)
+  TcpConnectResult(handle: fd, status: tcpConnectConnected, errorCode: 0)
+
 proc connectLocalhostTcp*(port: int): TcpHandle =
   connectTcp4(0x7f000001'u32, port)
+
+proc connectLocalhostTcpNonBlocking*(port: int): TcpConnectResult =
+  connectTcp4NonBlocking(0x7f000001'u32, port)
 
 proc resolveTcp4*(host: string; dest: var uint32): bool =
   ## Resolve the first IPv4 address for `host` into host byte order.
@@ -589,14 +697,22 @@ proc resolveTcp4*(host: string; dest: var uint32): bool =
   freeaddrinfo(resolved)
   false
 
-proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
+proc acceptTcpWithPeer*(listenFd: TcpHandle; peer: var TcpEndpoint): TcpHandle =
   var addr4 = default(SockaddrIn)
   when defined(windows):
     var addrLen = cint(sizeof(addr4))
-    acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
+    result = acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
   else:
     var addrLen = SockLen(sizeof(addr4))
-    acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
+    result = acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
+  if result == InvalidTcpHandle:
+    peer = invalidTcpEndpoint()
+  else:
+    peer = endpointFromSockaddr(addr4)
+
+proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
+  var peer = invalidTcpEndpoint()
+  acceptTcpWithPeer(listenFd, peer)
 
 proc readTcp*(fd: TcpHandle; buf: pointer; len: int): int =
   when defined(windows):

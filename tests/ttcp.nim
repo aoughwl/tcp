@@ -23,6 +23,13 @@ discard setTcpNonBlocking(h)
 var pollRequest = TcpPollRequest(read: true, write: false)
 var pollResult = default(TcpPollResult)
 discard pollTcp(h, pollRequest, 0, pollResult)
+discard waitTcpReadable(h, 0)
+discard waitTcpWritable(h, 0)
+var socketError = 0
+discard tcpSocketErrorCode(h, socketError)
+discard tcpSocketErrorCode(h)
+discard finishTcpConnect(h, socketError)
+discard finishTcpConnect(h)
 discard shutdownTcpRead(h)
 discard shutdownTcpWrite(h)
 discard shutdownTcpBoth(h)
@@ -33,9 +40,22 @@ discard localTcpEndpoint(h)
 discard peerTcpEndpoint(h)
 var resolved = 0'u32
 discard resolveTcp4("localhost", resolved)
+var peer = invalidTcpEndpoint()
+discard acceptTcpWithPeer(h, peer)
 let l4: proc(hostOrderAddr: uint32; port: int; backlog: int): TcpHandle = listenTcp4
 let c4: proc(hostOrderAddr: uint32; port: int): TcpHandle = connectTcp4
 let cl: proc(port: int): TcpHandle = connectLocalhostTcp
+let nb4: proc(hostOrderAddr: uint32; port: int): TcpConnectResult = connectTcp4NonBlocking
+let nbl: proc(port: int): TcpConnectResult = connectLocalhostTcpNonBlocking
 discard l4 == nil
 discard c4 == nil
 discard cl == nil
+discard nb4 == nil
+discard nbl == nil
+discard tcpConnectFailed
+discard tcpConnectInProgress
+discard tcpConnectConnected
+let connectResult = TcpConnectResult(handle: h, status: tcpConnectFailed, errorCode: 0)
+discard connectResult.handle
+discard connectResult.status
+discard connectResult.errorCode

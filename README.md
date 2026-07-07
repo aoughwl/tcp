@@ -1,6 +1,6 @@
 # tcp
 
-Native blocking TCP primitives.
+Native TCP primitives.
 
 The package provides a small socket API suitable for building higher-level
 network libraries:
@@ -24,6 +24,7 @@ shutdownTcp()
 |--------|------|
 | `TcpHandle` | native socket handle |
 | `TcpEndpoint` | IPv4 address and port reported by the socket stack |
+| `TcpConnectStatus`, `TcpConnectResult` | nonblocking connect result state |
 | `InvalidTcpHandle` | invalid socket sentinel |
 | `isValidTcp` | socket handle validity check |
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
@@ -32,8 +33,10 @@ shutdownTcp()
 | `tcpErrorWouldRetry`, `tcpErrorTimedOut`, `tcpErrorInterrupted`, `tcpErrorDisconnected` | common socket error predicates |
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
 | `connectTcp4`, `connectLocalhostTcp` | connect to an IPv4 peer |
+| `connectTcp4NonBlocking`, `connectLocalhostTcpNonBlocking` | start a nonblocking TCP connect |
 | `resolveTcp4` | resolve a hostname to an IPv4 address |
-| `acceptTcp` | accept one client |
+| `finishTcpConnect`, `tcpSocketErrorCode` | complete or inspect nonblocking connect state |
+| `acceptTcp`, `acceptTcpWithPeer` | accept one client, optionally returning peer metadata |
 | `invalidTcpEndpoint`, `localTcpEndpoint`, `peerTcpEndpoint` | endpoint introspection |
 | `readTcp` | read bytes into a caller-owned buffer |
 | `writeTcp` | write bytes from a caller-owned buffer |
@@ -42,12 +45,13 @@ shutdownTcp()
 | `setTcpReadTimeoutMillis`, `setTcpWriteTimeoutMillis`, `setTcpTimeoutMillis` | bound blocking socket I/O |
 | `setTcpBlocking`, `setTcpNonBlocking` | switch socket blocking mode |
 | `TcpPollRequest`, `TcpPollResult`, `pollTcp` | wait for socket readiness |
+| `waitTcpReadable`, `waitTcpWritable` | common readiness waits |
 | `shutdownTcpRead`, `shutdownTcpWrite`, `shutdownTcpBoth` | half-close or fully shut down socket traffic |
 | `closeTcp` | close a socket handle |
 
 ## Notes
 
-* Blocking API by design.
+* Blocking operations by default, with explicit nonblocking connect and readiness helpers.
 * POSIX sockets on Unix-like systems.
 * Winsock on Windows.
 * No framework runtime and no C shim.
