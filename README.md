@@ -29,6 +29,7 @@ shutdownTcp()
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
 | `lastTcpErrorCode` | last platform socket error code for the current thread |
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
+| `resolveTcp4` | resolve a hostname to an IPv4 address |
 | `acceptTcp` | accept one client |
 | `invalidTcpEndpoint`, `localTcpEndpoint`, `peerTcpEndpoint` | endpoint introspection |
 | `readTcp` | read bytes into a caller-owned buffer |

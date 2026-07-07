@@ -14,6 +14,16 @@ when defined(windows):
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+    AddrInfo {.importc: "struct addrinfo", header: "<ws2tcpip.h>".} = object
+      ai_flags*: cint
+      ai_family*: cint
+      ai_socktype*: cint
+      ai_protocol*: cint
+      ai_addrlen*: csize_t
+      ai_canonname*: nil cstring
+      ai_addr*: ptr SockAddr
+      ai_next*: AddrInfoPtr
+    AddrInfoPtr = nil ptr AddrInfo
 
     TcpEndpoint* = object
       address*: uint32
@@ -72,6 +82,10 @@ when defined(windows):
     stdcall, importc: "ntohs", dynlib: "ws2_32.dll".}
   proc ntohl(x: uint32): uint32 {.
     stdcall, importc: "ntohl", dynlib: "ws2_32.dll".}
+  proc getaddrinfo(node, service: nil cstring; hints: AddrInfoPtr; res: ptr AddrInfoPtr): cint {.
+    stdcall, importc: "getaddrinfo", dynlib: "ws2_32.dll".}
+  proc freeaddrinfo(res: AddrInfoPtr) {.
+    stdcall, importc: "freeaddrinfo", dynlib: "ws2_32.dll".}
 
   var tcpStarted = false
 
@@ -101,6 +115,16 @@ else:
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+    AddrInfo {.importc: "struct addrinfo", header: "<netdb.h>".} = object
+      ai_flags*: cint
+      ai_family*: cint
+      ai_socktype*: cint
+      ai_protocol*: cint
+      ai_addrlen*: SockLen
+      ai_addr*: ptr SockAddr
+      ai_canonname*: nil cstring
+      ai_next*: AddrInfoPtr
+    AddrInfoPtr = nil ptr AddrInfo
     TimeVal {.importc: "struct timeval", header: "<sys/time.h>".} = object
       tv_sec*: clong
       tv_usec*: clong
@@ -157,6 +181,10 @@ else:
     importc: "ntohs", header: "<arpa/inet.h>".}
   proc ntohl(x: uint32): uint32 {.
     importc: "ntohl", header: "<arpa/inet.h>".}
+  proc getaddrinfo(node, service: nil cstring; hints: AddrInfoPtr; res: ptr AddrInfoPtr): cint {.
+    importc: "getaddrinfo", header: "<netdb.h>".}
+  proc freeaddrinfo(res: AddrInfoPtr) {.
+    importc: "freeaddrinfo", header: "<netdb.h>".}
 
   when defined(macosx) or defined(freebsd) or defined(openbsd) or defined(netbsd):
     proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
@@ -343,6 +371,25 @@ proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
 
 proc connectLocalhostTcp*(port: int): TcpHandle =
   connectTcp4(0x7f000001'u32, port)
+
+proc resolveTcp4*(host: string; dest: var uint32): bool =
+  ## Resolve the first IPv4 address for `host` into host byte order.
+  if host.len == 0:
+    return false
+  var query = host
+  var resolved: AddrInfoPtr = nil
+  if getaddrinfo(query.toCString(), nil, nil, addr resolved) != 0:
+    return false
+  var item = resolved
+  while item != nil:
+    if item[].ai_family == AF_INET and item[].ai_addr != nil:
+      let addr4 = cast[ptr SockaddrIn](item[].ai_addr)
+      dest = ntohl(addr4[].sin_addr.s_addr)
+      freeaddrinfo(resolved)
+      return true
+    item = item[].ai_next
+  freeaddrinfo(resolved)
+  false
 
 proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
   var addr4 = default(SockaddrIn)

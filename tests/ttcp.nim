@@ -20,6 +20,8 @@ discard endpoint.address
 discard endpoint.port
 discard localTcpEndpoint(h)
 discard peerTcpEndpoint(h)
+var resolved = 0'u32
+discard resolveTcp4("localhost", resolved)
 let l4: proc(hostOrderAddr: uint32; port: int; backlog: int): TcpHandle = listenTcp4
 let c4: proc(hostOrderAddr: uint32; port: int): TcpHandle = connectTcp4
 let cl: proc(port: int): TcpHandle = connectLocalhostTcp
