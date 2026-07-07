@@ -1,4 +1,4 @@
-## tcp/native.aowl — native blocking TCP primitives.
+## tcp/native.nim — native blocking TCP primitives.
 ##
 ## This module binds directly to platform socket APIs. It uses no C shim and no
 ## framework runtime.
@@ -24,6 +24,20 @@ when defined(windows):
       ai_addr*: ptr SockAddr
       ai_next*: AddrInfoPtr
     AddrInfoPtr = nil ptr AddrInfo
+    PollFd {.importc: "WSAPOLLFD", header: "<winsock2.h>".} = object
+      fd*: TcpHandle
+      events*: cshort
+      revents*: cshort
+
+    TcpErrorKind* = enum
+      tcpErrorNone,
+      tcpErrorRetry,
+      tcpErrorTimeout,
+      tcpErrorInterrupted,
+      tcpErrorDisconnected,
+      tcpErrorRefused,
+      tcpErrorUnreachable,
+      tcpErrorUnknown
 
     TcpEndpoint* = object
       address*: uint32
@@ -43,6 +57,26 @@ when defined(windows):
     SD_RECEIVE = 0.cint
     SD_SEND = 1.cint
     SD_BOTH = 2.cint
+    FIONBIO = 0x8004667e.clong
+    PollIn = 0x0300.cshort
+    PollOut = 0x0010.cshort
+    PollErr = 0x0001.cshort
+    PollHup = 0x0002.cshort
+    PollNval = 0x0004.cshort
+    WSAEINTR = 10004
+    WSAEWOULDBLOCK = 10035
+    WSAEINPROGRESS = 10036
+    WSAEALREADY = 10037
+    WSAENETDOWN = 10050
+    WSAENETUNREACH = 10051
+    WSAENETRESET = 10052
+    WSAECONNABORTED = 10053
+    WSAECONNRESET = 10054
+    WSAENOTCONN = 10057
+    WSAESHUTDOWN = 10058
+    WSAETIMEDOUT = 10060
+    WSAECONNREFUSED = 10061
+    WSAEHOSTUNREACH = 10065
     INADDR_ANY = 0'u32
 
   proc WSAStartup(wVersionRequested: cushort; lpWSAData: ptr WSAData): cint {.
@@ -74,6 +108,10 @@ when defined(windows):
     stdcall, importc: "shutdown", dynlib: "ws2_32.dll".}
   proc closeSocket(s: TcpHandle): cint {.
     stdcall, importc: "closesocket", dynlib: "ws2_32.dll".}
+  proc ioctlsocket(s: TcpHandle; cmd: clong; argp: ptr culong): cint {.
+    stdcall, importc: "ioctlsocket", dynlib: "ws2_32.dll".}
+  proc WSAPoll(fdarray: ptr PollFd; nfds: culong; timeout: cint): cint {.
+    stdcall, importc: "WSAPoll", dynlib: "ws2_32.dll".}
   proc htons(x: cushort): cushort {.
     stdcall, importc: "htons", dynlib: "ws2_32.dll".}
   proc htonl(x: uint32): uint32 {.
@@ -104,6 +142,27 @@ when defined(windows):
     ## Return the last platform socket error code for the current thread.
     WSAGetLastError().int
 
+  proc classifyTcpErrorCode*(code: int): TcpErrorKind =
+    ## Classify a platform socket error code into portable socket categories.
+    if code == 0:
+      tcpErrorNone
+    elif code == WSAEWOULDBLOCK or code == WSAEINPROGRESS or code == WSAEALREADY:
+      tcpErrorRetry
+    elif code == WSAETIMEDOUT:
+      tcpErrorTimeout
+    elif code == WSAEINTR:
+      tcpErrorInterrupted
+    elif code == WSAENETDOWN or code == WSAENETUNREACH or code == WSAENETRESET or
+        code == WSAECONNABORTED or code == WSAECONNRESET or code == WSAENOTCONN or
+        code == WSAESHUTDOWN:
+      tcpErrorDisconnected
+    elif code == WSAECONNREFUSED:
+      tcpErrorRefused
+    elif code == WSAEHOSTUNREACH:
+      tcpErrorUnreachable
+    else:
+      tcpErrorUnknown
+
 else:
   type
     TcpHandle* = cint
@@ -125,9 +184,23 @@ else:
       ai_canonname*: nil cstring
       ai_next*: AddrInfoPtr
     AddrInfoPtr = nil ptr AddrInfo
+    PollFd {.importc: "struct pollfd", header: "<poll.h>".} = object
+      fd*: cint
+      events*: cshort
+      revents*: cshort
     TimeVal {.importc: "struct timeval", header: "<sys/time.h>".} = object
       tv_sec*: clong
       tv_usec*: clong
+
+    TcpErrorKind* = enum
+      tcpErrorNone,
+      tcpErrorRetry,
+      tcpErrorTimeout,
+      tcpErrorInterrupted,
+      tcpErrorDisconnected,
+      tcpErrorRefused,
+      tcpErrorUnreachable,
+      tcpErrorUnknown
 
     TcpEndpoint* = object
       address*: uint32
@@ -147,6 +220,11 @@ else:
     SHUT_RD = 0.cint
     SHUT_WR = 1.cint
     SHUT_RDWR = 2.cint
+    PollIn = 0x001.cshort
+    PollOut = 0x004.cshort
+    PollErr = 0x008.cshort
+    PollHup = 0x010.cshort
+    PollNval = 0x020.cshort
     INADDR_ANY = 0'u32
 
   proc socket(af, typ, protocol: cint): TcpHandle {.
@@ -173,6 +251,9 @@ else:
     importc: "shutdown", header: "<sys/socket.h>".}
   proc closeSocket(s: TcpHandle): cint {.
     importc: "close", header: "<unistd.h>".}
+  proc fcntl(fd, cmd: cint): cint {.varargs, importc: "fcntl", header: "<fcntl.h>".}
+  proc poll(fds: ptr PollFd; nfds: culong; timeout: cint): cint {.
+    importc: "poll", header: "<poll.h>".}
   proc htons(x: cushort): cushort {.
     importc: "htons", header: "<arpa/inet.h>".}
   proc htonl(x: uint32): uint32 {.
@@ -185,6 +266,24 @@ else:
     importc: "getaddrinfo", header: "<netdb.h>".}
   proc freeaddrinfo(res: AddrInfoPtr) {.
     importc: "freeaddrinfo", header: "<netdb.h>".}
+
+  var EAGAIN {.importc: "EAGAIN", header: "<errno.h>".}: cint
+  var EWOULDBLOCK {.importc: "EWOULDBLOCK", header: "<errno.h>".}: cint
+  var EINPROGRESS {.importc: "EINPROGRESS", header: "<errno.h>".}: cint
+  var EALREADY {.importc: "EALREADY", header: "<errno.h>".}: cint
+  var ETIMEDOUT {.importc: "ETIMEDOUT", header: "<errno.h>".}: cint
+  var EINTR {.importc: "EINTR", header: "<errno.h>".}: cint
+  var ENETDOWN {.importc: "ENETDOWN", header: "<errno.h>".}: cint
+  var ENETUNREACH {.importc: "ENETUNREACH", header: "<errno.h>".}: cint
+  var ECONNABORTED {.importc: "ECONNABORTED", header: "<errno.h>".}: cint
+  var ECONNRESET {.importc: "ECONNRESET", header: "<errno.h>".}: cint
+  var ENOTCONN {.importc: "ENOTCONN", header: "<errno.h>".}: cint
+  var EPIPE {.importc: "EPIPE", header: "<errno.h>".}: cint
+  var ECONNREFUSED {.importc: "ECONNREFUSED", header: "<errno.h>".}: cint
+  var EHOSTUNREACH {.importc: "EHOSTUNREACH", header: "<errno.h>".}: cint
+  var F_GETFL {.importc: "F_GETFL", header: "<fcntl.h>".}: cint
+  var F_SETFL {.importc: "F_SETFL", header: "<fcntl.h>".}: cint
+  var O_NONBLOCK {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
 
   when defined(macosx) or defined(freebsd) or defined(openbsd) or defined(netbsd):
     proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
@@ -203,6 +302,105 @@ else:
     if p == nil:
       return 0
     p[].int
+
+  proc classifyTcpErrorCode*(code: int): TcpErrorKind =
+    ## Classify a platform socket error code into portable socket categories.
+    let err = code.cint
+    if err == 0:
+      tcpErrorNone
+    elif err == EAGAIN or err == EWOULDBLOCK or err == EINPROGRESS or err == EALREADY:
+      tcpErrorRetry
+    elif err == ETIMEDOUT:
+      tcpErrorTimeout
+    elif err == EINTR:
+      tcpErrorInterrupted
+    elif err == ENETDOWN or err == ENETUNREACH or err == ECONNABORTED or
+        err == ECONNRESET or err == ENOTCONN or err == EPIPE:
+      tcpErrorDisconnected
+    elif err == ECONNREFUSED:
+      tcpErrorRefused
+    elif err == EHOSTUNREACH:
+      tcpErrorUnreachable
+    else:
+      tcpErrorUnknown
+
+proc lastTcpErrorKind*(): TcpErrorKind =
+  classifyTcpErrorCode(lastTcpErrorCode())
+
+proc tcpErrorWouldRetry*(code: int): bool =
+  classifyTcpErrorCode(code) == tcpErrorRetry
+
+proc tcpErrorTimedOut*(code: int): bool =
+  classifyTcpErrorCode(code) == tcpErrorTimeout
+
+proc tcpErrorInterrupted*(code: int): bool =
+  classifyTcpErrorCode(code) == tcpErrorInterrupted
+
+proc tcpErrorDisconnected*(code: int): bool =
+  let kind = classifyTcpErrorCode(code)
+  kind == tcpErrorDisconnected or kind == tcpErrorRefused or kind == tcpErrorUnreachable
+
+type
+  TcpPollRequest* = object
+    read*: bool
+    write*: bool
+
+  TcpPollResult* = object
+    read*: bool
+    write*: bool
+    error*: bool
+    hangup*: bool
+    invalid*: bool
+
+proc setTcpBlocking*(fd: TcpHandle; blocking: bool): bool =
+  ## Switch a socket between blocking and nonblocking mode.
+  if fd == InvalidTcpHandle:
+    return false
+  when defined(windows):
+    var mode: culong = 1
+    if blocking:
+      mode = 0
+    result = ioctlsocket(fd, FIONBIO, addr mode) == 0
+  else:
+    let flags = fcntl(fd, F_GETFL)
+    if flags < 0:
+      return false
+    var next = flags
+    if blocking:
+      next = flags and not O_NONBLOCK
+    else:
+      next = flags or O_NONBLOCK
+    result = fcntl(fd, F_SETFL, next) == 0
+
+proc setTcpNonBlocking*(fd: TcpHandle): bool =
+  ## Convenience wrapper for `setTcpBlocking(fd, false)`.
+  setTcpBlocking(fd, false)
+
+proc pollTcp*(fd: TcpHandle; request: TcpPollRequest; timeoutMillis: int;
+              ready: var TcpPollResult): int =
+  ## Wait for socket readiness. Returns >0 ready, 0 timeout, or <0 error.
+  ready = TcpPollResult(read: false, write: false, error: false, hangup: false, invalid: false)
+  if fd == InvalidTcpHandle:
+    ready.invalid = true
+    return -1
+  var events: cshort = 0
+  if request.read:
+    events = events or PollIn
+  if request.write:
+    events = events or PollOut
+  var pfd = PollFd(fd: fd, events: events, revents: 0)
+  when defined(windows):
+    let n = WSAPoll(addr pfd, 1.culong, timeoutMillis.cint)
+  else:
+    let n = poll(addr pfd, 1.culong, timeoutMillis.cint)
+  if n <= 0:
+    return n.int
+  ready.read = (pfd.revents and PollIn) != 0
+  ready.write = (pfd.revents and PollOut) != 0
+  ready.error = (pfd.revents and PollErr) != 0
+  ready.hangup = (pfd.revents and PollHup) != 0
+  ready.invalid = (pfd.revents and PollNval) != 0
+  n.int
 
 proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
   ## Listen on an IPv4 address encoded in host byte order.

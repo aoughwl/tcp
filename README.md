@@ -28,7 +28,10 @@ shutdownTcp()
 | `isValidTcp` | socket handle validity check |
 | `initTcp`, `shutdownTcp` | platform socket lifecycle |
 | `lastTcpErrorCode` | last platform socket error code for the current thread |
+| `TcpErrorKind`, `lastTcpErrorKind`, `classifyTcpErrorCode` | portable socket error classification |
+| `tcpErrorWouldRetry`, `tcpErrorTimedOut`, `tcpErrorInterrupted`, `tcpErrorDisconnected` | common socket error predicates |
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
+| `connectTcp4`, `connectLocalhostTcp` | connect to an IPv4 peer |
 | `resolveTcp4` | resolve a hostname to an IPv4 address |
 | `acceptTcp` | accept one client |
 | `invalidTcpEndpoint`, `localTcpEndpoint`, `peerTcpEndpoint` | endpoint introspection |
@@ -37,6 +40,8 @@ shutdownTcp()
 | `writeAllTcp` | retry short writes until complete or error |
 | `setTcpNoDelay`, `setTcpKeepAlive` | common TCP socket options |
 | `setTcpReadTimeoutMillis`, `setTcpWriteTimeoutMillis`, `setTcpTimeoutMillis` | bound blocking socket I/O |
+| `setTcpBlocking`, `setTcpNonBlocking` | switch socket blocking mode |
+| `TcpPollRequest`, `TcpPollResult`, `pollTcp` | wait for socket readiness |
 | `shutdownTcpRead`, `shutdownTcpWrite`, `shutdownTcpBoth` | half-close or fully shut down socket traffic |
 | `closeTcp` | close a socket handle |
 

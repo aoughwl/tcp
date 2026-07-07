@@ -1,4 +1,4 @@
-## ttcp.aowl — compile-time API smoke for tcp.
+## ttcp.nim — compile-time API smoke for tcp.
 
 import tcp
 
@@ -6,12 +6,23 @@ var h = InvalidTcpHandle
 discard h
 discard isValidTcp(h)
 discard lastTcpErrorCode()
+discard lastTcpErrorKind()
+discard classifyTcpErrorCode(0)
+discard tcpErrorWouldRetry(0)
+discard tcpErrorTimedOut(0)
+discard tcpErrorInterrupted(0)
+discard tcpErrorDisconnected(0)
 discard sizeof(TcpHandle)
 discard setTcpNoDelay(h)
 discard setTcpKeepAlive(h)
 discard setTcpReadTimeoutMillis(h, 0)
 discard setTcpWriteTimeoutMillis(h, 0)
 discard setTcpTimeoutMillis(h, 0)
+discard setTcpBlocking(h, true)
+discard setTcpNonBlocking(h)
+var pollRequest = TcpPollRequest(read: true, write: false)
+var pollResult = default(TcpPollResult)
+discard pollTcp(h, pollRequest, 0, pollResult)
 discard shutdownTcpRead(h)
 discard shutdownTcpWrite(h)
 discard shutdownTcpBoth(h)
