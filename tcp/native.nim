@@ -24,6 +24,16 @@ when defined(windows):
       ai_addr*: ptr SockAddr
       ai_next*: AddrInfoPtr
     AddrInfoPtr = nil ptr AddrInfo
+    # Non-self-referential hints view; see the posix branch for rationale.
+    AddrInfoHints {.importc: "struct addrinfo", header: "<ws2tcpip.h>".} = object
+      ai_flags*: cint
+      ai_family*: cint
+      ai_socktype*: cint
+      ai_protocol*: cint
+      ai_addrlen*: csize_t
+      ai_canonname*: nil pointer
+      ai_addr*: nil pointer
+      ai_next*: nil pointer
     PollFd {.importc: "WSAPOLLFD", header: "<winsock2.h>".} = object
       fd*: TcpHandle
       events*: cshort
@@ -59,6 +69,10 @@ when defined(windows):
   const
     InvalidTcpHandle* = not 0'u
     AF_INET = 2.cint
+    AF_INET6 = 23.cint            # Winsock AF_INET6
+    IPPROTO_IPV6 = 41.cint
+    IPV6_V6ONLY = 27.cint         # Winsock IPV6_V6ONLY
+    AI_PASSIVE = 0x00000001.cint
     SOCK_STREAM = 1.cint
     IPPROTO_TCP = 6.cint
     SOL_SOCKET = 0xffff.cint
@@ -210,6 +224,18 @@ else:
       ai_canonname*: nil cstring
       ai_next*: AddrInfoPtr
     AddrInfoPtr = nil ptr AddrInfo
+    # A non-self-referential view of the same `struct addrinfo`, used only to
+    # build a zeroable getaddrinfo `hints` (the real AddrInfo can't be
+    # `default()`-ed because it points at itself). Cast to AddrInfoPtr on use.
+    AddrInfoHints {.importc: "struct addrinfo", header: "<netdb.h>".} = object
+      ai_flags*: cint
+      ai_family*: cint
+      ai_socktype*: cint
+      ai_protocol*: cint
+      ai_addrlen*: SockLen
+      ai_addr*: nil pointer
+      ai_canonname*: nil pointer
+      ai_next*: nil pointer
     PollFd {.importc: "struct pollfd", header: "<poll.h>".} = object
       fd*: cint
       events*: cshort
@@ -338,6 +364,11 @@ else:
   var F_GETFL {.importc: "F_GETFL", header: "<fcntl.h>".}: cint
   var F_SETFL {.importc: "F_SETFL", header: "<fcntl.h>".}: cint
   var O_NONBLOCK {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
+  # IPv6 / dual-stack.
+  var AF_INET6 {.importc: "AF_INET6", header: "<sys/socket.h>".}: cint
+  var IPPROTO_IPV6 {.importc: "IPPROTO_IPV6", header: "<netinet/in.h>".}: cint
+  var IPV6_V6ONLY {.importc: "IPV6_V6ONLY", header: "<netinet/in.h>".}: cint
+  var AI_PASSIVE {.importc: "AI_PASSIVE", header: "<netdb.h>".}: cint
 
   when defined(macosx) or defined(freebsd) or defined(openbsd) or defined(netbsd):
     proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
@@ -879,6 +910,101 @@ proc resolveTcp4*(host: string; dest: var uint32): bool =
     item = item[].ai_next
   freeaddrinfo(resolved)
   false
+
+proc portToService(port: int): string =
+  ## Decimal port as a service string for getaddrinfo (no slicing / itoa dep).
+  if port <= 0:
+    return "0"
+  var v = port
+  var digits = default(array[8, char])
+  var n = 0
+  while v > 0 and n < digits.len:
+    digits[n] = char(ord('0') + (v mod 10))
+    v = v div 10
+    inc n
+  result = ""
+  var i = n - 1
+  while i >= 0:
+    result.add digits[i]
+    dec i
+
+proc connectAddrInfo(info: AddrInfoPtr): TcpHandle =
+  ## Try each resolved address in turn (any family), returning the first that
+  ## connects. The sockaddr from getaddrinfo is passed to `connect` opaquely, so
+  ## this works for IPv4 (A) and IPv6 (AAAA) without any per-family struct.
+  var item = info
+  while item != nil:
+    if item[].ai_addr != nil:
+      let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
+      if s != InvalidTcpHandle:
+        when defined(windows):
+          if connectSocket(s, item[].ai_addr, cint(item[].ai_addrlen)) == 0:
+            return s
+        else:
+          if connectSocket(s, item[].ai_addr, item[].ai_addrlen) == 0:
+            return s
+        discard closeSocket(s)
+    item = item[].ai_next
+  return InvalidTcpHandle
+
+proc connectHostTcp*(host: string; port: int): TcpHandle =
+  ## Resolve `host` (IPv4 and/or IPv6) and connect to the first address that
+  ## accepts. Family-agnostic: prefers whatever order the resolver returns
+  ## (typically IPv6 first when available, then IPv4). Returns `InvalidTcpHandle`
+  ## if resolution fails or no address connects.
+  if host.len == 0:
+    return InvalidTcpHandle
+  var node = host
+  var serv = portToService(port)
+  var hints = default(AddrInfoHints)
+  hints.ai_family = 0            # AF_UNSPEC: allow both IPv4 and IPv6
+  hints.ai_socktype = SOCK_STREAM
+  var resolved: AddrInfoPtr = nil
+  if getaddrinfo(node.toCString(), serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
+    return InvalidTcpHandle
+  result = connectAddrInfo(resolved)
+  freeaddrinfo(resolved)
+
+proc listenTcp6*(port: int; backlog = 128; dualStack = true): TcpHandle =
+  ## Listen on an IPv6 socket bound to the wildcard address. With `dualStack`
+  ## (default) `IPV6_V6ONLY` is cleared so the same socket also accepts
+  ## IPv4-mapped connections — one listener serving both families. Set
+  ## `dualStack = false` for IPv6-only.
+  var serv = portToService(port)
+  var hints = default(AddrInfoHints)
+  hints.ai_family = AF_INET6
+  hints.ai_socktype = SOCK_STREAM
+  hints.ai_flags = AI_PASSIVE
+  var resolved: AddrInfoPtr = nil
+  if getaddrinfo(nil, serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
+    return InvalidTcpHandle
+  var fd = InvalidTcpHandle
+  var item = resolved
+  while item != nil:
+    let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
+    if s != InvalidTcpHandle:
+      var yes: cint = 1
+      var v6only: cint = 0
+      if not dualStack:
+        v6only = 1
+      when defined(windows):
+        discard setsockopt(s, SOL_SOCKET, SO_REUSEADDR, addr yes, cint(sizeof(yes)))
+        discard setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, addr v6only, cint(sizeof(v6only)))
+        if bindSocket(s, item[].ai_addr, cint(item[].ai_addrlen)) == 0 and
+           listenSocket(s, backlog.cint) == 0:
+          fd = s
+      else:
+        discard setsockopt(s, SOL_SOCKET, SO_REUSEADDR, addr yes, SockLen(sizeof(yes)))
+        discard setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, addr v6only, SockLen(sizeof(v6only)))
+        if bindSocket(s, item[].ai_addr, item[].ai_addrlen) == 0 and
+           listenSocket(s, backlog.cint) == 0:
+          fd = s
+      if fd != InvalidTcpHandle:
+        break
+      discard closeSocket(s)
+    item = item[].ai_next
+  freeaddrinfo(resolved)
+  return fd
 
 proc acceptTcpWithPeer*(listenFd: TcpHandle; peer: var TcpEndpoint): TcpHandle =
   var addr4 = default(SockaddrIn)
