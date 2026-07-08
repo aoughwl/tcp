@@ -15,6 +15,20 @@ discard tcpErrorDisconnected(0)
 discard sizeof(TcpHandle)
 discard setTcpNoDelay(h)
 discard setTcpKeepAlive(h)
+discard setTcpReuseAddr(h)
+discard setTcpReusePort(h)
+discard setTcpBroadcast(h)
+discard setTcpLinger(h, true, 0)
+discard setTcpRecvBufferSize(h, 0)
+discard setTcpSendBufferSize(h, 0)
+discard setTcpOption(h, 0.cint, 0.cint, 0)
+var optDest = 0.cint
+discard getTcpOption(h, 0.cint, 0.cint, optDest)
+discard formatIpv4(0x7f000001'u32)
+var parsedAddr = 0'u32
+discard parseIpv4Text("127.0.0.1", parsedAddr)
+let ct: proc(hostOrderAddr: uint32; port: int; timeoutMillis: int): TcpConnectResult = connectTcp4Timeout
+discard ct == nil
 discard setTcpReadTimeoutMillis(h, 0)
 discard setTcpWriteTimeoutMillis(h, 0)
 discard setTcpTimeoutMillis(h, 0)

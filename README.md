@@ -34,6 +34,8 @@ shutdownTcp()
 | `listenTcp`, `listenTcp4` | bind and listen on a TCP port |
 | `connectTcp4`, `connectLocalhostTcp` | connect to an IPv4 peer |
 | `connectTcp4NonBlocking`, `connectLocalhostTcpNonBlocking` | start a nonblocking TCP connect |
+| `connectTcp4Timeout` | blocking connect with a timeout (nonblocking connect + poll) |
+| `formatIpv4`, `parseIpv4Text` | convert IPv4 host-order uint32 to/from dotted-decimal text |
 | `resolveTcp4` | resolve a hostname to an IPv4 address |
 | `finishTcpConnect`, `tcpSocketErrorCode` | complete or inspect nonblocking connect state |
 | `acceptTcp`, `acceptTcpWithPeer` | accept one client, optionally returning peer metadata |
@@ -42,6 +44,10 @@ shutdownTcp()
 | `writeTcp` | write bytes from a caller-owned buffer |
 | `writeAllTcp` | retry short writes until complete or error |
 | `setTcpNoDelay`, `setTcpKeepAlive` | common TCP socket options |
+| `setTcpReuseAddr`, `setTcpReusePort`, `setTcpBroadcast` | boolean socket options (`SO_REUSEPORT` is POSIX-only) |
+| `setTcpLinger` | configure `SO_LINGER` close behavior |
+| `setTcpRecvBufferSize`, `setTcpSendBufferSize` | request `SO_RCVBUF` / `SO_SNDBUF` sizes |
+| `setTcpOption`, `getTcpOption` | generic integer socket option get/set passthrough |
 | `setTcpReadTimeoutMillis`, `setTcpWriteTimeoutMillis`, `setTcpTimeoutMillis` | bound blocking socket I/O |
 | `setTcpBlocking`, `setTcpNonBlocking` | switch socket blocking mode |
 | `TcpPollRequest`, `TcpPollResult`, `pollTcp` | wait for socket readiness |

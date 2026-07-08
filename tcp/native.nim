@@ -28,6 +28,9 @@ when defined(windows):
       fd*: TcpHandle
       events*: cshort
       revents*: cshort
+    Linger {.importc: "struct linger", header: "<winsock2.h>".} = object
+      l_onoff*: cushort
+      l_linger*: cushort
 
     TcpErrorKind* = enum
       tcpErrorNone,
@@ -61,6 +64,10 @@ when defined(windows):
     SOL_SOCKET = 0xffff.cint
     SO_REUSEADDR = 4.cint
     SO_KEEPALIVE = 8.cint
+    SO_BROADCAST = 0x0020.cint
+    SO_LINGER = 0x0080.cint
+    SO_SNDBUF = 0x1001.cint
+    SO_RCVBUF = 0x1002.cint
     SO_SNDTIMEO = 0x1005.cint
     SO_RCVTIMEO = 0x1006.cint
     SO_ERROR = 0x1007.cint
@@ -69,6 +76,12 @@ when defined(windows):
     SD_SEND = 1.cint
     SD_BOTH = 2.cint
     FIONBIO = 0x8004667e.clong
+    # Winsock does not raise SIGPIPE; there is no MSG_NOSIGNAL, so send() uses 0.
+    MSG_NOSIGNAL = 0.cint
+    # WSAPOLLFD event/revent flags, per <winsock2.h>. These match the documented
+    # Winsock values and are intentionally different from the POSIX <poll.h> bits:
+    #   POLLRDNORM 0x0100, POLLRDBAND 0x0200, POLLIN = RDNORM|RDBAND = 0x0300,
+    #   POLLWRNORM/POLLOUT 0x0010, POLLERR 0x0001, POLLHUP 0x0002, POLLNVAL 0x0004.
     PollIn = 0x0300.cshort
     PollOut = 0x0010.cshort
     PollErr = 0x0001.cshort
@@ -204,6 +217,9 @@ else:
     TimeVal {.importc: "struct timeval", header: "<sys/time.h>".} = object
       tv_sec*: clong
       tv_usec*: clong
+    Linger {.importc: "struct linger", header: "<sys/socket.h>".} = object
+      l_onoff*: cint
+      l_linger*: cint
 
     TcpErrorKind* = enum
       tcpErrorNone,
@@ -307,6 +323,18 @@ else:
   var SO_SNDTIMEO {.importc: "SO_SNDTIMEO", header: "<sys/socket.h>".}: cint
   var SO_RCVTIMEO {.importc: "SO_RCVTIMEO", header: "<sys/socket.h>".}: cint
   var SO_ERROR {.importc: "SO_ERROR", header: "<sys/socket.h>".}: cint
+  var SO_BROADCAST {.importc: "SO_BROADCAST", header: "<sys/socket.h>".}: cint
+  var SO_LINGER {.importc: "SO_LINGER", header: "<sys/socket.h>".}: cint
+  var SO_RCVBUF {.importc: "SO_RCVBUF", header: "<sys/socket.h>".}: cint
+  var SO_SNDBUF {.importc: "SO_SNDBUF", header: "<sys/socket.h>".}: cint
+  var SO_REUSEPORT {.importc: "SO_REUSEPORT", header: "<sys/socket.h>".}: cint
+  # MSG_NOSIGNAL suppresses SIGPIPE on send() to a broken pipe (Linux/BSD).
+  # macOS lacks the flag (it uses the SO_NOSIGPIPE sockopt instead), so fall
+  # back to 0 there to keep this branch compiling.
+  when defined(macosx):
+    const MSG_NOSIGNAL = 0.cint
+  else:
+    var MSG_NOSIGNAL {.importc: "MSG_NOSIGNAL", header: "<sys/socket.h>".}: cint
   var F_GETFL {.importc: "F_GETFL", header: "<fcntl.h>".}: cint
   var F_SETFL {.importc: "F_SETFL", header: "<fcntl.h>".}: cint
   var O_NONBLOCK {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
@@ -365,6 +393,65 @@ proc tcpErrorInterrupted*(code: int): bool =
 proc tcpErrorDisconnected*(code: int): bool =
   let kind = classifyTcpErrorCode(code)
   kind == tcpErrorDisconnected or kind == tcpErrorRefused or kind == tcpErrorUnreachable
+
+proc appendOctet(s: var string; value: uint32) =
+  ## Append the decimal digits of a single 0..255 octet.
+  let v = value and 0xff'u32
+  if v >= 100'u32:
+    s.add(char(ord('0') + int(v div 100'u32)))
+    s.add(char(ord('0') + int((v div 10'u32) mod 10'u32)))
+    s.add(char(ord('0') + int(v mod 10'u32)))
+  elif v >= 10'u32:
+    s.add(char(ord('0') + int(v div 10'u32)))
+    s.add(char(ord('0') + int(v mod 10'u32)))
+  else:
+    s.add(char(ord('0') + int(v)))
+
+proc formatIpv4*(address: uint32): string =
+  ## Format a host-order IPv4 address as dotted-decimal text "a.b.c.d".
+  ## The high byte is the first octet, e.g. 0x7f000001 -> "127.0.0.1".
+  result = ""
+  appendOctet(result, (address shr 24) and 0xff'u32)
+  result.add('.')
+  appendOctet(result, (address shr 16) and 0xff'u32)
+  result.add('.')
+  appendOctet(result, (address shr 8) and 0xff'u32)
+  result.add('.')
+  appendOctet(result, address and 0xff'u32)
+
+proc parseIpv4Text*(s: string; dest: var uint32): bool =
+  ## Parse dotted-decimal IPv4 text into a host-order uint32 (inverse of
+  ## `formatIpv4`). Char-walked and range-checked: rejects octets > 255,
+  ## empty octets, non-digits, and anything other than exactly four octets.
+  var value: uint32 = 0
+  var octetCount = 0
+  var acc: uint32 = 0
+  var digits = 0
+  var i = 0
+  while i < s.len:
+    let c = s[i]
+    if c == '.':
+      if digits == 0:
+        return false            # empty octet, e.g. "1..2.3"
+      if octetCount >= 3:
+        return false            # too many dots
+      value = (value shl 8) or acc
+      octetCount = octetCount + 1
+      acc = 0
+      digits = 0
+    elif c >= '0' and c <= '9':
+      acc = acc * 10'u32 + uint32(ord(c) - ord('0'))
+      if acc > 255'u32:
+        return false            # octet out of range
+      digits = digits + 1
+    else:
+      return false              # invalid character
+    i = i + 1
+  if octetCount != 3 or digits == 0:
+    return false                # need exactly four non-empty octets
+  value = (value shl 8) or acc
+  dest = value
+  true
 
 type
   TcpPollRequest* = object
@@ -591,6 +678,81 @@ proc setTcpTimeoutMillis*(fd: TcpHandle; millis: int): bool =
     return false
   setTcpWriteTimeoutMillis(fd, millis)
 
+proc setTcpIntOpt(fd: TcpHandle; level, optname: cint; value: cint): bool =
+  ## Set an integer-valued socket option, guarding an invalid handle.
+  if fd == InvalidTcpHandle:
+    return false
+  var v = value
+  when defined(windows):
+    result = setsockopt(fd, level, optname, addr v, cint(sizeof(v))) == 0
+  else:
+    result = setsockopt(fd, level, optname, addr v, SockLen(sizeof(v))) == 0
+
+proc setTcpReuseAddr*(fd: TcpHandle; enabled = true): bool =
+  ## Allow binding to an address/port still in TIME_WAIT (SO_REUSEADDR).
+  setTcpBoolOpt(fd, SOL_SOCKET, SO_REUSEADDR, enabled)
+
+proc setTcpReusePort*(fd: TcpHandle; enabled = true): bool =
+  ## Allow multiple sockets to bind the same port (SO_REUSEPORT). Unsupported
+  ## on Windows, where it returns false.
+  when defined(windows):
+    result = false
+  else:
+    result = setTcpBoolOpt(fd, SOL_SOCKET, SO_REUSEPORT, enabled)
+
+proc setTcpBroadcast*(fd: TcpHandle; enabled = true): bool =
+  ## Permit sending to a broadcast address (SO_BROADCAST).
+  setTcpBoolOpt(fd, SOL_SOCKET, SO_BROADCAST, enabled)
+
+proc setTcpLinger*(fd: TcpHandle; onoff: bool; seconds: int): bool =
+  ## Configure SO_LINGER. When `onoff` is true, close() blocks up to `seconds`
+  ## for unsent data to flush; when false, linger is disabled.
+  if fd == InvalidTcpHandle or seconds < 0:
+    return false
+  var value = default(Linger)
+  when defined(windows):
+    if onoff:
+      value.l_onoff = 1.cushort
+    else:
+      value.l_onoff = 0.cushort
+    value.l_linger = cushort(seconds)
+    result = setsockopt(fd, SOL_SOCKET, SO_LINGER, addr value, cint(sizeof(value))) == 0
+  else:
+    if onoff:
+      value.l_onoff = 1.cint
+    else:
+      value.l_onoff = 0.cint
+    value.l_linger = cint(seconds)
+    result = setsockopt(fd, SOL_SOCKET, SO_LINGER, addr value, SockLen(sizeof(value))) == 0
+
+proc setTcpRecvBufferSize*(fd: TcpHandle; bytes: int): bool =
+  ## Request the socket receive buffer size (SO_RCVBUF).
+  setTcpIntOpt(fd, SOL_SOCKET, SO_RCVBUF, bytes.cint)
+
+proc setTcpSendBufferSize*(fd: TcpHandle; bytes: int): bool =
+  ## Request the socket send buffer size (SO_SNDBUF).
+  setTcpIntOpt(fd, SOL_SOCKET, SO_SNDBUF, bytes.cint)
+
+proc setTcpOption*(fd: TcpHandle; level, optname: cint; intval: int): bool =
+  ## Generic passthrough to set any integer-valued socket option.
+  setTcpIntOpt(fd, level, optname, intval.cint)
+
+proc getTcpOption*(fd: TcpHandle; level, optname: cint; dest: var cint): bool =
+  ## Generic passthrough to read any integer-valued socket option.
+  if fd == InvalidTcpHandle:
+    return false
+  var value: cint = 0
+  when defined(windows):
+    var valueLen = cint(sizeof(value))
+    if getsockopt(fd, level, optname, addr value, addr valueLen) != 0:
+      return false
+  else:
+    var valueLen = SockLen(sizeof(value))
+    if getsockopt(fd, level, optname, addr value, addr valueLen) != 0:
+      return false
+  dest = value
+  true
+
 proc shutdownTcpRead*(fd: TcpHandle): bool =
   ## Forbid further receives on the socket while keeping the handle open.
   if fd == InvalidTcpHandle:
@@ -672,6 +834,27 @@ proc connectTcp4NonBlocking*(hostOrderAddr: uint32; port: int): TcpConnectResult
         return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: code)
   TcpConnectResult(handle: fd, status: tcpConnectConnected, errorCode: 0)
 
+proc connectTcp4Timeout*(hostOrderAddr: uint32; port: int; timeoutMillis: int): TcpConnectResult =
+  ## Blocking connect with a timeout, composed from the nonblocking connect and
+  ## `pollTcp`. On success the returned handle is switched back to blocking mode.
+  var res = connectTcp4NonBlocking(hostOrderAddr, port)
+  if res.status == tcpConnectConnected:
+    discard setTcpBlocking(res.handle, true)
+    return res
+  if res.status == tcpConnectFailed:
+    return res
+  # In progress: wait for the socket to become writable, then check SO_ERROR.
+  if not waitTcpWritable(res.handle, timeoutMillis):
+    discard closeSocket(res.handle)
+    return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed,
+                            errorCode: res.errorCode)
+  var errorCode = 0
+  if finishTcpConnect(res.handle, errorCode):
+    discard setTcpBlocking(res.handle, true)
+    return TcpConnectResult(handle: res.handle, status: tcpConnectConnected, errorCode: 0)
+  discard closeSocket(res.handle)
+  TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: errorCode)
+
 proc connectLocalhostTcp*(port: int): TcpHandle =
   connectTcp4(0x7f000001'u32, port)
 
@@ -721,10 +904,13 @@ proc readTcp*(fd: TcpHandle; buf: pointer; len: int): int =
     result = recvSocket(fd, buf, len.csize_t, 0)
 
 proc writeTcp*(fd: TcpHandle; buf: pointer; len: int): int =
+  ## Write bytes from a caller-owned buffer. On Linux/BSD the send uses
+  ## MSG_NOSIGNAL so a broken-pipe write returns EPIPE instead of killing the
+  ## process with SIGPIPE. `writeAllTcp` inherits this via `writeTcp`.
   when defined(windows):
     result = sendSocket(fd, buf, len.cint, 0).int
   else:
-    result = sendSocket(fd, buf, len.csize_t, 0)
+    result = sendSocket(fd, buf, len.csize_t, MSG_NOSIGNAL)
 
 proc closeTcp*(fd: TcpHandle) =
   if fd != InvalidTcpHandle:
