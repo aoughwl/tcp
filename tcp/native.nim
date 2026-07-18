@@ -14,6 +14,14 @@ when defined(windows):
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+    # IPv6 sockaddr. Only the scalar fields are declared; the 16 address bytes
+    # live at byte offset 8 (family 2 + port 2 + flowinfo 4) and are read by
+    # pointer offset in `endpointFromStorage`, avoiding the s6_addr union macro.
+    Sockaddr_in6 {.importc: "struct sockaddr_in6", header: "<ws2tcpip.h>".} = object
+      sin6_family*: cushort
+      sin6_port*: cushort
+      sin6_flowinfo*: uint32
+      sin6_scope_id*: uint32
     AddrInfo {.importc: "struct addrinfo", header: "<ws2tcpip.h>".} = object
       ai_flags*: cint
       ai_family*: cint
@@ -57,8 +65,15 @@ when defined(windows):
       tcpConnectInProgress,
       tcpConnectConnected
 
+    TcpAddressFamily* = enum
+      tcpFamilyV4,
+      tcpFamilyV6
+
     TcpEndpoint* = object
-      address*: uint32
+      family*: TcpAddressFamily
+      address*: uint32           ## host-order IPv4, valid when family == tcpFamilyV4
+      v6*: array[16, byte]       ## network-order 16 bytes, valid when family == tcpFamilyV6
+      scopeId*: uint32           ## IPv6 zone/scope id (v6 only)
       port*: int
 
     TcpConnectResult* = object
@@ -214,6 +229,14 @@ else:
       sin_family*: cushort
       sin_port*: cushort
       sin_addr*: InAddr
+    # IPv6 sockaddr. Only the scalar fields are declared; the 16 address bytes
+    # live at byte offset 8 (family 2 + port 2 + flowinfo 4) and are read by
+    # pointer offset in `endpointFromStorage`, avoiding the s6_addr union macro.
+    Sockaddr_in6 {.importc: "struct sockaddr_in6", header: "<netinet/in.h>".} = object
+      sin6_family*: cushort
+      sin6_port*: cushort
+      sin6_flowinfo*: uint32
+      sin6_scope_id*: uint32
     AddrInfo {.importc: "struct addrinfo", header: "<netdb.h>".} = object
       ai_flags*: cint
       ai_family*: cint
@@ -262,8 +285,15 @@ else:
       tcpConnectInProgress,
       tcpConnectConnected
 
+    TcpAddressFamily* = enum
+      tcpFamilyV4,
+      tcpFamilyV6
+
     TcpEndpoint* = object
-      address*: uint32
+      family*: TcpAddressFamily
+      address*: uint32           ## host-order IPv4, valid when family == tcpFamilyV4
+      v6*: array[16, byte]       ## network-order 16 bytes, valid when family == tcpFamilyV6
+      scopeId*: uint32           ## IPv6 zone/scope id (v6 only)
       port*: int
 
     TcpConnectResult* = object
@@ -484,6 +514,247 @@ proc parseIpv4Text*(s: string; dest: var uint32): bool =
   dest = value
   true
 
+proc appendHex16(s: var string; value: uint) =
+  ## Append a 16-bit group as lowercase hex with no leading zeros (RFC 5952).
+  const digits = "0123456789abcdef"
+  if value == 0'u:
+    s.add('0')
+    return
+  var started = false
+  var shift = 12
+  while shift >= 0:
+    let nib = int((value shr uint(shift)) and 0xf'u)
+    if nib != 0 or started:
+      s.add(digits[nib])
+      started = true
+    shift = shift - 4
+
+proc formatIpv6*(a: array[16, byte]): string =
+  ## Format 16 IPv6 address bytes as RFC 5952 canonical text: lowercase hex,
+  ## no leading zeros per group, the single longest run of >= 2 zero groups
+  ## compressed to "::" (leftmost on a tie). IPv4-mapped addresses
+  ## (`::ffff:a.b.c.d`) render with a dotted-quad tail.
+  # IPv4-mapped: first 10 bytes zero, bytes 10..11 == 0xff.
+  var mapped = true
+  var m = 0
+  while m < 10:
+    if a[m] != 0'u8:
+      mapped = false
+      break
+    inc m
+  if mapped and a[10] == 0xff'u8 and a[11] == 0xff'u8:
+    result = "::ffff:"
+    appendOctet(result, uint32(a[12]))
+    result.add('.')
+    appendOctet(result, uint32(a[13]))
+    result.add('.')
+    appendOctet(result, uint32(a[14]))
+    result.add('.')
+    appendOctet(result, uint32(a[15]))
+    return result
+
+  var g = default(array[8, uint])
+  var i = 0
+  while i < 8:
+    g[i] = (uint(a[2 * i]) shl 8) or uint(a[2 * i + 1])
+    inc i
+
+  # Longest run of consecutive zero groups.
+  var bestStart = -1
+  var bestLen = 0
+  var curStart = -1
+  var curLen = 0
+  i = 0
+  while i < 8:
+    if g[i] == 0'u:
+      if curStart < 0:
+        curStart = i
+        curLen = 1
+      else:
+        curLen = curLen + 1
+      if curLen > bestLen:
+        bestLen = curLen
+        bestStart = curStart
+    else:
+      curStart = -1
+      curLen = 0
+    inc i
+  if bestLen < 2:
+    bestStart = -1
+
+  result = ""
+  if bestStart < 0:
+    i = 0
+    while i < 8:
+      if i > 0:
+        result.add(':')
+      appendHex16(result, g[i])
+      inc i
+  else:
+    i = 0
+    while i < bestStart:
+      if i > 0:
+        result.add(':')
+      appendHex16(result, g[i])
+      inc i
+    result.add("::")
+    i = bestStart + bestLen
+    var first = true
+    while i < 8:
+      if not first:
+        result.add(':')
+      appendHex16(result, g[i])
+      first = false
+      inc i
+
+proc parseIpv4Range(s: string; lo, hi: int; dest: var uint32): bool =
+  ## Parse dotted-decimal IPv4 over the half-open range [lo, hi) into host order.
+  var value: uint32 = 0
+  var octetCount = 0
+  var acc: uint32 = 0
+  var digits = 0
+  var i = lo
+  while i < hi:
+    let c = s[i]
+    if c == '.':
+      if digits == 0:
+        return false
+      if octetCount >= 3:
+        return false
+      value = (value shl 8) or acc
+      octetCount = octetCount + 1
+      acc = 0
+      digits = 0
+    elif c >= '0' and c <= '9':
+      acc = acc * 10'u32 + uint32(ord(c) - ord('0'))
+      if acc > 255'u32:
+        return false
+      digits = digits + 1
+    else:
+      return false
+    inc i
+  if octetCount != 3 or digits == 0:
+    return false
+  value = (value shl 8) or acc
+  dest = value
+  true
+
+proc parseV6Side(s: string; lo, hi: int; groups: var array[8, int]; count: var int): bool =
+  ## Parse one colon-separated side of an IPv6 literal over [lo, hi) into 16-bit
+  ## groups. The final segment may be an embedded IPv4 dotted quad (2 groups).
+  count = 0
+  if lo >= hi:
+    return true
+  var i = lo
+  while i < hi:
+    let segStart = i
+    var isV4 = false
+    while i < hi and s[i] != ':':
+      if s[i] == '.':
+        isV4 = true
+      inc i
+    if segStart == i:
+      return false            # empty segment (e.g. stray ':')
+    if isV4:
+      if i < hi:
+        return false          # embedded IPv4 must be the last segment
+      var v4: uint32 = 0
+      if not parseIpv4Range(s, segStart, i, v4):
+        return false
+      if count > 6:
+        return false
+      groups[count] = int((v4 shr 16) and 0xffff'u32)
+      inc count
+      groups[count] = int(v4 and 0xffff'u32)
+      inc count
+    else:
+      var val = 0
+      var d = 0
+      var j = segStart
+      while j < i:
+        let c = s[j]
+        var hv = 0
+        if c >= '0' and c <= '9':
+          hv = ord(c) - ord('0')
+        elif c >= 'a' and c <= 'f':
+          hv = ord(c) - ord('a') + 10
+        elif c >= 'A' and c <= 'F':
+          hv = ord(c) - ord('A') + 10
+        else:
+          return false
+        val = val * 16 + hv
+        inc d
+        if d > 4:
+          return false        # more than 4 hex digits in a group
+        inc j
+      if count >= 8:
+        return false
+      groups[count] = val
+      inc count
+    if i < hi:
+      inc i                   # consume the ':' separator
+      if i >= hi:
+        return false          # a bare trailing ':' is invalid here
+  true
+
+proc parseIpv6Text*(s: string): tuple[ok: bool, bytes: array[16, byte]] =
+  ## Parse IPv6 text into 16 address bytes. Accepts the full 8-group form, the
+  ## "::" zero-compressed form (at most once), and a trailing IPv4 dotted quad
+  ## (e.g. "::ffff:1.2.3.4"). Char-walked; never slices. On failure `ok` is
+  ## false and the bytes are all zero.
+  var bytes = default(array[16, byte])
+  if s.len == 0:
+    return (false, bytes)
+
+  # Locate a single "::" (zero-run compression marker).
+  var dc = -1
+  var i = 0
+  while i + 1 < s.len:
+    if s[i] == ':' and s[i + 1] == ':':
+      dc = i
+      break
+    inc i
+
+  var before = default(array[8, int])
+  var nBefore = 0
+  var after = default(array[8, int])
+  var nAfter = 0
+  var groups = default(array[8, int])
+
+  if dc >= 0:
+    # A second "::" would leave an empty segment on one side -> rejected there.
+    if not parseV6Side(s, 0, dc, before, nBefore):
+      return (false, bytes)
+    if not parseV6Side(s, dc + 2, s.len, after, nAfter):
+      return (false, bytes)
+    if nBefore + nAfter > 7:   # "::" must compress at least one zero group
+      return (false, bytes)
+    var k = 0
+    while k < nBefore:
+      groups[k] = before[k]
+      inc k
+    let zeros = 8 - nBefore - nAfter
+    k = 0
+    while k < nAfter:
+      groups[nBefore + zeros + k] = after[k]
+      inc k
+  else:
+    if not parseV6Side(s, 0, s.len, before, nBefore):
+      return (false, bytes)
+    if nBefore != 8:
+      return (false, bytes)
+    var k = 0
+    while k < 8:
+      groups[k] = before[k]
+      inc k
+
+  var k = 0
+  while k < 8:
+    bytes[2 * k] = uint8((groups[k] shr 8) and 0xff)
+    bytes[2 * k + 1] = uint8(groups[k] and 0xff)
+    inc k
+  (true, bytes)
+
 type
   TcpPollRequest* = object
     read*: bool
@@ -630,39 +901,68 @@ proc invalidTcpEndpoint*(): TcpEndpoint =
 
 proc endpointFromSockaddr(addr4: SockaddrIn): TcpEndpoint =
   TcpEndpoint(
+    family: tcpFamilyV4,
     address: ntohl(addr4.sin_addr.s_addr),
     port: int(ntohs(addr4.sin_port))
   )
 
+proc endpointFromStorage(storagePtr: pointer): TcpEndpoint =
+  ## Decode a filled `sockaddr_storage` into a family-carrying `TcpEndpoint`.
+  ## Branches on the address family: IPv6 (AF_INET6) reads the 16 address bytes
+  ## from byte offset 8 plus the scope id; anything else is treated as IPv4.
+  let fam = cast[ptr cushort](storagePtr)[]
+  if fam == cushort(AF_INET6):
+    var ep = default(TcpEndpoint)
+    ep.family = tcpFamilyV6
+    let sin6 = cast[ptr Sockaddr_in6](storagePtr)
+    ep.port = int(ntohs(sin6[].sin6_port))
+    ep.scopeId = sin6[].sin6_scope_id
+    let base = cast[uint](storagePtr)
+    var i = 0
+    while i < 16:
+      ep.v6[i] = cast[ptr uint8](base + 8'u + uint(i))[]
+      inc i
+    return ep
+  else:
+    let sin = cast[ptr SockaddrIn](storagePtr)
+    return TcpEndpoint(
+      family: tcpFamilyV4,
+      address: ntohl(sin[].sin_addr.s_addr),
+      port: int(ntohs(sin[].sin_port))
+    )
+
 proc localTcpEndpoint*(fd: TcpHandle): TcpEndpoint =
-  ## Return the socket's bound IPv4 address and port, or an invalid endpoint.
+  ## Return the socket's bound address and port (IPv4 or IPv6), or an invalid
+  ## endpoint. Reads into a `sockaddr_storage`-sized buffer and branches on the
+  ## reported family, so a v6 socket yields a v6 endpoint.
   if fd == InvalidTcpHandle:
     return invalidTcpEndpoint()
-  var addr4 = default(SockaddrIn)
+  var storage = default(array[16, uint64])   # 128 bytes, 8-byte aligned
   when defined(windows):
-    var addrLen = cint(sizeof(addr4))
-    if getsockname(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+    var addrLen = cint(sizeof(storage))
+    if getsockname(fd, cast[ptr SockAddr](addr storage[0]), addr addrLen) != 0:
       return invalidTcpEndpoint()
   else:
-    var addrLen = SockLen(sizeof(addr4))
-    if getsockname(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+    var addrLen = SockLen(sizeof(storage))
+    if getsockname(fd, cast[ptr SockAddr](addr storage[0]), addr addrLen) != 0:
       return invalidTcpEndpoint()
-  endpointFromSockaddr(addr4)
+  endpointFromStorage(cast[pointer](addr storage[0]))
 
 proc peerTcpEndpoint*(fd: TcpHandle): TcpEndpoint =
-  ## Return the connected peer's IPv4 address and port, or an invalid endpoint.
+  ## Return the connected peer's address and port (IPv4 or IPv6), or an invalid
+  ## endpoint. Family-aware, mirroring `localTcpEndpoint`.
   if fd == InvalidTcpHandle:
     return invalidTcpEndpoint()
-  var addr4 = default(SockaddrIn)
+  var storage = default(array[16, uint64])   # 128 bytes, 8-byte aligned
   when defined(windows):
-    var addrLen = cint(sizeof(addr4))
-    if getpeername(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+    var addrLen = cint(sizeof(storage))
+    if getpeername(fd, cast[ptr SockAddr](addr storage[0]), addr addrLen) != 0:
       return invalidTcpEndpoint()
   else:
-    var addrLen = SockLen(sizeof(addr4))
-    if getpeername(fd, cast[ptr SockAddr](addr addr4), addr addrLen) != 0:
+    var addrLen = SockLen(sizeof(storage))
+    if getpeername(fd, cast[ptr SockAddr](addr storage[0]), addr addrLen) != 0:
       return invalidTcpEndpoint()
-  endpointFromSockaddr(addr4)
+  endpointFromStorage(cast[pointer](addr storage[0]))
 
 proc setTcpBoolOpt(fd: TcpHandle; level, optname: cint; enabled: bool): bool =
   if fd == InvalidTcpHandle:
@@ -1007,17 +1307,17 @@ proc listenTcp6*(port: int; backlog = 128; dualStack = true): TcpHandle =
   return fd
 
 proc acceptTcpWithPeer*(listenFd: TcpHandle; peer: var TcpEndpoint): TcpHandle =
-  var addr4 = default(SockaddrIn)
+  var storage = default(array[16, uint64])   # 128 bytes, 8-byte aligned
   when defined(windows):
-    var addrLen = cint(sizeof(addr4))
-    result = acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
+    var addrLen = cint(sizeof(storage))
+    result = acceptSocket(listenFd, cast[ptr SockAddr](addr storage[0]), addr addrLen)
   else:
-    var addrLen = SockLen(sizeof(addr4))
-    result = acceptSocket(listenFd, cast[ptr SockAddr](addr addr4), addr addrLen)
+    var addrLen = SockLen(sizeof(storage))
+    result = acceptSocket(listenFd, cast[ptr SockAddr](addr storage[0]), addr addrLen)
   if result == InvalidTcpHandle:
     peer = invalidTcpEndpoint()
   else:
-    peer = endpointFromSockaddr(addr4)
+    peer = endpointFromStorage(cast[pointer](addr storage[0]))
 
 proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
   var peer = invalidTcpEndpoint()
