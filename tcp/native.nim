@@ -3,6 +3,9 @@
 ## This module binds directly to platform socket APIs. It uses no C shim and no
 ## framework runtime.
 
+import tcpopts
+export tcpopts
+
 when defined(windows):
   type
     TcpHandle* = uint
@@ -884,40 +887,6 @@ proc finishTcpConnect*(fd: TcpHandle; errorCode: var int): bool =
     return false
   errorCode == 0
 
-proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
-  ## Listen on an IPv4 address encoded in host byte order.
-  let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-  if fd == InvalidTcpHandle:
-    return InvalidTcpHandle
-  markCloseOnExec(fd)
-  var yes: cint = 1
-  when defined(windows):
-    discard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, addr yes, cint(sizeof(yes)))
-  else:
-    discard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, addr yes, SockLen(sizeof(yes)))
-
-  var addr4 = default(SockaddrIn)
-  addr4.sin_family = cushort(AF_INET)
-  addr4.sin_port = htons(cushort(port))
-  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
-
-  when defined(windows):
-    if bindSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) != 0:
-      discard closeSocket(fd)
-      return InvalidTcpHandle
-  else:
-    if bindSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) != 0:
-      discard closeSocket(fd)
-      return InvalidTcpHandle
-
-  if listenSocket(fd, backlog.cint) != 0:
-    discard closeSocket(fd)
-    return InvalidTcpHandle
-  return fd
-
-proc listenTcp*(port: int; backlog = 128): TcpHandle =
-  listenTcp4(INADDR_ANY, port, backlog)
-
 proc invalidTcpEndpoint*(): TcpEndpoint =
   TcpEndpoint(address: 0'u32, port: -1)
 
@@ -1290,47 +1259,6 @@ proc connectHostTcp*(host: string; port: int): TcpHandle =
   result = connectAddrInfo(resolved)
   freeaddrinfo(resolved)
 
-proc listenTcp6*(port: int; backlog = 128; dualStack = true): TcpHandle =
-  ## Listen on an IPv6 socket bound to the wildcard address. With `dualStack`
-  ## (default) `IPV6_V6ONLY` is cleared so the same socket also accepts
-  ## IPv4-mapped connections — one listener serving both families. Set
-  ## `dualStack = false` for IPv6-only.
-  var serv = portToService(port)
-  var hints = default(AddrInfoHints)
-  hints.ai_family = AF_INET6
-  hints.ai_socktype = SOCK_STREAM
-  hints.ai_flags = AI_PASSIVE
-  var resolved: AddrInfoPtr = nil
-  if getaddrinfo(nil, serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
-    return InvalidTcpHandle
-  var fd = InvalidTcpHandle
-  var item = resolved
-  while item != nil:
-    let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
-    markCloseOnExec(s)
-    if s != InvalidTcpHandle:
-      var yes: cint = 1
-      var v6only: cint = 0
-      if not dualStack:
-        v6only = 1
-      when defined(windows):
-        discard setsockopt(s, SOL_SOCKET, SO_REUSEADDR, addr yes, cint(sizeof(yes)))
-        discard setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, addr v6only, cint(sizeof(v6only)))
-        if bindSocket(s, item[].ai_addr, cint(item[].ai_addrlen)) == 0 and
-           listenSocket(s, backlog.cint) == 0:
-          fd = s
-      else:
-        discard setsockopt(s, SOL_SOCKET, SO_REUSEADDR, addr yes, SockLen(sizeof(yes)))
-        discard setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, addr v6only, SockLen(sizeof(v6only)))
-        if bindSocket(s, item[].ai_addr, item[].ai_addrlen) == 0 and
-           listenSocket(s, backlog.cint) == 0:
-          fd = s
-      if fd != InvalidTcpHandle:
-        break
-      discard closeSocket(s)
-    item = item[].ai_next
-  freeaddrinfo(resolved)
-  return fd
 
 proc acceptTcpWithPeer*(listenFd: TcpHandle; peer: var TcpEndpoint): TcpHandle =
   var storage = default(array[16, uint64])   # 128 bytes, 8-byte aligned
@@ -1382,3 +1310,343 @@ proc writeAllTcp*(fd: TcpHandle; buf: pointer; len: int): int =
     if n <= 0:
       return result
     result = result + n
+
+# ---------------------------------------------------------------------------
+# Options as data
+#
+# Everything below turns the imperative setters above into something a caller
+# can *carry*: a `TcpOpts` record that travels down through `net`, `serve` and
+# the reactor, and is applied once, at the point the socket exists.
+# ---------------------------------------------------------------------------
+
+proc setTcpCloseOnExec*(fd: TcpHandle; enabled = true): bool =
+  ## Set or clear FD_CLOEXEC. `markCloseOnExec` only ever sets it; a caller that
+  ## deliberately hands a listener to a child (socket activation, a supervised
+  ## re-exec) needs to clear it too.
+  when defined(windows):
+    result = fd != InvalidTcpHandle
+  else:
+    if fd == InvalidTcpHandle:
+      return false
+    let flags = fcntl(fd, F_GETFD)
+    if flags < 0:
+      return false
+    var next = flags
+    if enabled:
+      next = flags or FD_CLOEXEC
+    else:
+      next = flags and not FD_CLOEXEC
+    result = fcntl(fd, F_SETFD, next) == 0
+
+proc setTcpV6Only*(fd: TcpHandle; enabled: bool): bool =
+  ## IPV6_V6ONLY. Clearing it (the default for our listeners) makes one IPv6
+  ## socket also accept IPv4-mapped peers.
+  var flag: cint = 0
+  if enabled:
+    flag = 1
+  if fd == InvalidTcpHandle:
+    return false
+  when defined(windows):
+    result = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, addr flag, cint(sizeof(flag))) == 0
+  else:
+    result = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, addr flag, SockLen(sizeof(flag))) == 0
+
+proc setTcpBindDevice*(fd: TcpHandle; iface: string): bool =
+  ## SO_BINDTODEVICE — pin the socket to one network interface by name. This is
+  ## the option the generic `setTcpOption` escape hatch cannot reach, because
+  ## its value is a string rather than an int. Linux only; returns false
+  ## elsewhere rather than pretending to have worked.
+  when defined(linux):
+    if fd == InvalidTcpHandle or iface.len == 0:
+      return false
+    # <asm-generic/socket.h>; a stable part of the Linux ABI, and not exposed by
+    # <sys/socket.h> without _GNU_SOURCE, so it is spelled out rather than bound.
+    const SO_BINDTODEVICE = 25.cint
+    var name = iface
+    result = setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
+                        cast[pointer](name.toCString()),
+                        SockLen(name.len + 1)) == 0
+  else:
+    result = false
+
+proc bindTcp4*(fd: TcpHandle; hostOrderAddr: uint32; port: int): bool =
+  ## Bind a local IPv4 address and/or port before connecting. Source-address
+  ## selection had no entry point at all before this: a multi-homed host could
+  ## not choose which address its outbound connections came from.
+  if fd == InvalidTcpHandle:
+    return false
+  var addr4 = default(SockaddrIn)
+  addr4.sin_family = cushort(AF_INET)
+  addr4.sin_port = htons(cushort(port))
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
+  when defined(windows):
+    result = bindSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) == 0
+  else:
+    result = bindSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) == 0
+
+proc note(report: var TcpOptsReport; name: string; succeeded: bool) =
+  ## Record one option outcome. A rejected option is counted and the first one
+  ## named — the alternative, `discard setTcpX(...)`, is exactly the silent-drop
+  ## pattern this stack has been removing everywhere else.
+  if succeeded:
+    report.applied = report.applied + 1
+  else:
+    report.failed = report.failed + 1
+    if report.firstFailure.len == 0:
+      report.firstFailure = name
+
+proc applyTcpOpts*(fd: TcpHandle; opts: TcpOpts): TcpOptsReport =
+  ## Apply every *set* field of `opts` to an existing handle, reporting what
+  ## the platform accepted. Unset fields are not touched, so applying
+  ## `defaultTcpOpts()` is a no-op by construction.
+  ##
+  ## `backlog`, `bindHost` and `bindPort` are not socket options and are not
+  ## handled here; they belong to the moment the socket is created, and the
+  ## `*Opts` entry points below consume them.
+  result = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  if fd == InvalidTcpHandle:
+    note(result, "handle", false)
+    return result
+
+  if opts.closeOnExec != optUnset:
+    note(result, "closeOnExec", setTcpCloseOnExec(fd, opts.closeOnExec == optOn))
+  if opts.reuseAddr != optUnset:
+    note(result, "reuseAddr", setTcpReuseAddr(fd, opts.reuseAddr == optOn))
+  if opts.reusePort != optUnset:
+    note(result, "reusePort", setTcpReusePort(fd, opts.reusePort == optOn))
+  if opts.noDelay != optUnset:
+    note(result, "noDelay", setTcpNoDelay(fd, opts.noDelay == optOn))
+  if opts.keepAlive != optUnset:
+    note(result, "keepAlive", setTcpKeepAlive(fd, opts.keepAlive == optOn))
+  if opts.broadcast != optUnset:
+    note(result, "broadcast", setTcpBroadcast(fd, opts.broadcast == optOn))
+  if opts.linger != optUnset:
+    var secs = 0
+    if opts.lingerSeconds != TcpUnset:
+      secs = opts.lingerSeconds
+    note(result, "linger", setTcpLinger(fd, opts.linger == optOn, secs))
+  if opts.recvBufferSize != TcpUnset:
+    note(result, "recvBufferSize", setTcpRecvBufferSize(fd, opts.recvBufferSize))
+  if opts.sendBufferSize != TcpUnset:
+    note(result, "sendBufferSize", setTcpSendBufferSize(fd, opts.sendBufferSize))
+  if opts.readTimeoutMillis != TcpUnset:
+    note(result, "readTimeoutMillis", setTcpReadTimeoutMillis(fd, opts.readTimeoutMillis))
+  if opts.writeTimeoutMillis != TcpUnset:
+    note(result, "writeTimeoutMillis", setTcpWriteTimeoutMillis(fd, opts.writeTimeoutMillis))
+  if opts.bindDevice.len > 0:
+    note(result, "bindDevice", setTcpBindDevice(fd, opts.bindDevice))
+  # Blocking mode goes last: an option set after the socket is non-blocking is
+  # no harder to apply, but a caller reading the report should not see a
+  # failure that was really caused by a mode switch happening too early.
+  if opts.nonBlocking != optUnset:
+    note(result, "nonBlocking", setTcpBlocking(fd, opts.nonBlocking != optOn))
+
+proc applyBindOpts(fd: TcpHandle; opts: TcpOpts; report: var TcpOptsReport) =
+  ## The local-bind half of a client policy, kept out of `applyTcpOpts` because
+  ## it must happen before `connect` and only once.
+  if opts.bindHost.len == 0 and opts.bindPort == TcpUnset:
+    return
+  var host: uint32 = 0
+  if opts.bindHost.len > 0:
+    if not parseIpv4Text(opts.bindHost, host):
+      note(report, "bindHost", false)
+      return
+  var port = 0
+  if opts.bindPort != TcpUnset:
+    port = opts.bindPort
+  note(report, "bindLocal", bindTcp4(fd, host, port))
+
+proc listenTcpOpts*(hostOrderAddr: uint32; port: int; opts: TcpOpts;
+                    report: var TcpOptsReport): TcpHandle =
+  ## Create an IPv4 listener under an explicit policy. This is the real
+  ## implementation; `listenTcp4` and `listenTcp` are the historical shapes of
+  ## it. Note what changed: SO_REUSEADDR is now a *field*, so a caller that
+  ## needs a bind to fail loudly on a port still in TIME_WAIT can finally say so
+  ## by setting `reuseAddr: optOff`.
+  report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+  if fd == InvalidTcpHandle:
+    note(report, "socket", false)
+    return InvalidTcpHandle
+
+  report = applyTcpOpts(fd, opts)
+
+  var addr4 = default(SockaddrIn)
+  addr4.sin_family = cushort(AF_INET)
+  addr4.sin_port = htons(cushort(port))
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
+
+  var bound = false
+  when defined(windows):
+    bound = bindSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) == 0
+  else:
+    bound = bindSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) == 0
+  if not bound:
+    note(report, "bind", false)
+    discard closeSocket(fd)
+    return InvalidTcpHandle
+
+  if listenSocket(fd, backlogOr(opts).cint) != 0:
+    note(report, "listen", false)
+    discard closeSocket(fd)
+    return InvalidTcpHandle
+  return fd
+
+proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = DefaultBacklog): TcpHandle =
+  ## Listen on an IPv4 address encoded in host byte order, under the stock
+  ## listener policy (SO_REUSEADDR and FD_CLOEXEC on).
+  var opts = defaultListenerOpts()
+  opts.backlog = backlog
+  var report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  listenTcpOpts(hostOrderAddr, port, opts, report)
+
+proc listenTcp*(port: int; backlog = DefaultBacklog): TcpHandle =
+  listenTcp4(INADDR_ANY, port, backlog)
+
+proc listenTcp6Opts*(port: int; opts: TcpOpts;
+                     report: var TcpOptsReport): TcpHandle =
+  ## Create an IPv6 listener under an explicit policy. Dual-stack is
+  ## `opts.v6Only == optOff`, which is what `defaultListenerOpts()` sets.
+  report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  var serv = portToService(port)
+  var hints = default(AddrInfoHints)
+  hints.ai_family = AF_INET6
+  hints.ai_socktype = SOCK_STREAM
+  hints.ai_flags = AI_PASSIVE
+  var resolved: AddrInfoPtr = nil
+  if getaddrinfo(nil, serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
+    note(report, "getaddrinfo", false)
+    return InvalidTcpHandle
+  var fd = InvalidTcpHandle
+  var item = resolved
+  while item != nil:
+    let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
+    if s != InvalidTcpHandle:
+      report = applyTcpOpts(s, opts)
+      # v6Only is meaningful on this socket even when the record leaves it
+      # unset, because "unset" for a dual-stack listener still has to mean the
+      # dual-stack behaviour callers have always had.
+      note(report, "v6Only", setTcpV6Only(s, not wantsDualStack(opts)))
+      var bound = false
+      when defined(windows):
+        bound = bindSocket(s, item[].ai_addr, cint(item[].ai_addrlen)) == 0
+      else:
+        bound = bindSocket(s, item[].ai_addr, item[].ai_addrlen) == 0
+      if bound and listenSocket(s, backlogOr(opts).cint) == 0:
+        fd = s
+      if fd != InvalidTcpHandle:
+        break
+      discard closeSocket(s)
+    item = item[].ai_next
+  freeaddrinfo(resolved)
+  if fd == InvalidTcpHandle:
+    note(report, "bind", false)
+  return fd
+
+proc listenTcp6*(port: int; backlog = DefaultBacklog; dualStack = true): TcpHandle =
+  ## Listen on an IPv6 socket bound to the wildcard address. With `dualStack`
+  ## (default) `IPV6_V6ONLY` is cleared so the same socket also accepts
+  ## IPv4-mapped connections — one listener serving both families. Set
+  ## `dualStack = false` for IPv6-only.
+  var opts = defaultListenerOpts()
+  opts.backlog = backlog
+  if dualStack:
+    opts.v6Only = optOff
+  else:
+    opts.v6Only = optOn
+  var report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  listenTcp6Opts(port, opts, report)
+
+proc connectTcp4Opts*(hostOrderAddr: uint32; port: int; opts: TcpOpts;
+                      report: var TcpOptsReport): TcpHandle =
+  ## Connect under an explicit policy. Options are applied to the socket
+  ## *before* `connect`, which is the only point at which SO_RCVBUF/SO_SNDBUF
+  ## and a local bind can still take effect.
+  report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+  if fd == InvalidTcpHandle:
+    note(report, "socket", false)
+    return InvalidTcpHandle
+  report = applyTcpOpts(fd, opts)
+  applyBindOpts(fd, opts, report)
+
+  var addr4 = default(SockaddrIn)
+  addr4.sin_family = cushort(AF_INET)
+  addr4.sin_port = htons(cushort(port))
+  addr4.sin_addr.s_addr = htonl(hostOrderAddr)
+  var connected = false
+  when defined(windows):
+    connected = connectSocket(fd, cast[ptr SockAddr](addr addr4), cint(sizeof(addr4))) == 0
+  else:
+    connected = connectSocket(fd, cast[ptr SockAddr](addr addr4), SockLen(sizeof(addr4))) == 0
+  if not connected:
+    # A non-blocking socket reports "in progress" rather than success; that is
+    # the caller's to finish with `finishTcpConnect`, not an error here.
+    if opts.nonBlocking == optOn:
+      let code = lastTcpErrorCode()
+      if classifyTcpErrorCode(code) == tcpErrorRetry:
+        return fd
+    note(report, "connect", false)
+    discard closeSocket(fd)
+    return InvalidTcpHandle
+  return fd
+
+# ---------------------------------------------------------------------------
+# Reaching the escape hatch
+#
+# `setTcpOption`/`getTcpOption` were documented as a generic passthrough to any
+# int-valued socket option, but every `level` and `optname` constant in this
+# module is private and their numeric values differ between Winsock and POSIX.
+# A caller outside this module therefore had no way to name an option: the
+# escape hatch existed and could not be reached. These resolve a portable name
+# to the platform's own pair.
+# ---------------------------------------------------------------------------
+
+proc tcpOptionByName*(name: string; level: var cint; optname: var cint): bool =
+  ## Resolve a portable lowercase option name to this platform's
+  ## (level, optname). Returns false for a name this platform does not have,
+  ## rather than silently resolving to option 0.
+  case name
+  of "reuseaddr":
+    level = SOL_SOCKET; optname = SO_REUSEADDR; result = true
+  of "keepalive":
+    level = SOL_SOCKET; optname = SO_KEEPALIVE; result = true
+  of "broadcast":
+    level = SOL_SOCKET; optname = SO_BROADCAST; result = true
+  of "rcvbuf":
+    level = SOL_SOCKET; optname = SO_RCVBUF; result = true
+  of "sndbuf":
+    level = SOL_SOCKET; optname = SO_SNDBUF; result = true
+  of "error":
+    level = SOL_SOCKET; optname = SO_ERROR; result = true
+  of "nodelay":
+    level = IPPROTO_TCP; optname = TCP_NODELAY; result = true
+  of "v6only":
+    level = IPPROTO_IPV6; optname = IPV6_V6ONLY; result = true
+  of "reuseport":
+    when defined(windows):
+      result = false
+    else:
+      level = SOL_SOCKET; optname = SO_REUSEPORT; result = true
+  else:
+    result = false
+
+proc setTcpOptionByName*(fd: TcpHandle; name: string; value: int): bool =
+  ## Set an int-valued socket option by portable name.
+  var level: cint = 0
+  var optname: cint = 0
+  if not tcpOptionByName(name, level, optname):
+    return false
+  setTcpOption(fd, level, optname, value)
+
+proc getTcpOptionByName*(fd: TcpHandle; name: string; dest: var int): bool =
+  ## Read an int-valued socket option by portable name.
+  var level: cint = 0
+  var optname: cint = 0
+  if not tcpOptionByName(name, level, optname):
+    return false
+  var raw: cint = 0
+  if not getTcpOption(fd, level, optname, raw):
+    return false
+  dest = raw.int
+  result = true
