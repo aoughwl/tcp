@@ -182,6 +182,11 @@ when defined(windows):
 
   var tcpStarted = false
 
+  proc markCloseOnExec*(fd: TcpHandle): bool {.discardable.} =
+    ## No-op on Windows: handle inheritance is a CreateProcess argument there,
+    ## not a per-descriptor flag. Present so callers stay portable.
+    fd != InvalidTcpHandle
+
   proc initTcp*() =
     if not tcpStarted:
       var data = default(WSAData)
@@ -394,6 +399,9 @@ else:
   var F_GETFL {.importc: "F_GETFL", header: "<fcntl.h>".}: cint
   var F_SETFL {.importc: "F_SETFL", header: "<fcntl.h>".}: cint
   var O_NONBLOCK {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
+  var F_GETFD {.importc: "F_GETFD", header: "<fcntl.h>".}: cint
+  var F_SETFD {.importc: "F_SETFD", header: "<fcntl.h>".}: cint
+  var FD_CLOEXEC {.importc: "FD_CLOEXEC", header: "<fcntl.h>".}: cint
   # IPv6 / dual-stack.
   var AF_INET6 {.importc: "AF_INET6", header: "<sys/socket.h>".}: cint
   var IPPROTO_IPV6 {.importc: "IPPROTO_IPV6", header: "<netinet/in.h>".}: cint
@@ -404,6 +412,19 @@ else:
     proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
   else:
     proc errnoLocation(): ptr cint {.importc: "__errno_location", header: "<errno.h>".}
+
+  proc markCloseOnExec*(fd: TcpHandle): bool {.discardable.} =
+    ## Set FD_CLOEXEC so the descriptor does not survive `exec`. Sockets are
+    ## inheritable by default, so without this every socket this library opens
+    ## leaks into any child process — a listener a child keeps alive holds the
+    ## port after the parent exits, and a connected socket hands a child a live
+    ## peer connection it was never meant to see.
+    if fd == InvalidTcpHandle:
+      return false
+    let flags = fcntl(fd, F_GETFD)
+    if flags < 0:
+      return false
+    fcntl(fd, F_SETFD, flags or FD_CLOEXEC) == 0
 
   proc initTcp*() =
     discard
@@ -868,6 +889,7 @@ proc listenTcp4*(hostOrderAddr: uint32; port: int; backlog = 128): TcpHandle =
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return InvalidTcpHandle
+  markCloseOnExec(fd)
   var yes: cint = 1
   when defined(windows):
     discard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, addr yes, cint(sizeof(yes)))
@@ -1116,6 +1138,7 @@ proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return InvalidTcpHandle
+  markCloseOnExec(fd)
 
   var addr4 = default(SockaddrIn)
   addr4.sin_family = cushort(AF_INET)
@@ -1137,6 +1160,7 @@ proc connectTcp4NonBlocking*(hostOrderAddr: uint32; port: int): TcpConnectResult
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: lastTcpErrorCode())
+  markCloseOnExec(fd)
   if not setTcpNonBlocking(fd):
     let code = lastTcpErrorCode()
     discard closeSocket(fd)
@@ -1237,6 +1261,7 @@ proc connectAddrInfo(info: AddrInfoPtr): TcpHandle =
     if item[].ai_addr != nil:
       let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
       if s != InvalidTcpHandle:
+        markCloseOnExec(s)
         when defined(windows):
           if connectSocket(s, item[].ai_addr, cint(item[].ai_addrlen)) == 0:
             return s
@@ -1282,6 +1307,7 @@ proc listenTcp6*(port: int; backlog = 128; dualStack = true): TcpHandle =
   var item = resolved
   while item != nil:
     let s = socket(item[].ai_family, item[].ai_socktype, item[].ai_protocol)
+    markCloseOnExec(s)
     if s != InvalidTcpHandle:
       var yes: cint = 1
       var v6only: cint = 0
@@ -1317,6 +1343,9 @@ proc acceptTcpWithPeer*(listenFd: TcpHandle; peer: var TcpEndpoint): TcpHandle =
   if result == InvalidTcpHandle:
     peer = invalidTcpEndpoint()
   else:
+    # an accepted socket is a brand-new descriptor and inherits nothing from
+    # the listener, so it needs FD_CLOEXEC set independently
+    markCloseOnExec(result)
     peer = endpointFromStorage(cast[pointer](addr storage[0]))
 
 proc acceptTcp*(listenFd: TcpHandle): TcpHandle =
