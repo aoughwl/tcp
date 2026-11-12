@@ -1104,6 +1104,7 @@ proc shutdownTcpBoth*(fd: TcpHandle): bool =
 
 proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
   ## Connect to an IPv4 address encoded in host byte order.
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return InvalidTcpHandle
@@ -1126,6 +1127,7 @@ proc connectTcp4*(hostOrderAddr: uint32; port: int): TcpHandle =
 
 proc connectTcp4NonBlocking*(hostOrderAddr: uint32; port: int): TcpConnectResult =
   ## Start a nonblocking IPv4 connect. Poll for writability, then call `finishTcpConnect`.
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     return TcpConnectResult(handle: InvalidTcpHandle, status: tcpConnectFailed, errorCode: lastTcpErrorCode())
@@ -1191,6 +1193,7 @@ proc resolveTcp4*(host: string; dest: var uint32): bool =
     return false
   var query = host
   var resolved: AddrInfoPtr = nil
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   if getaddrinfo(query.toCString(), nil, nil, addr resolved) != 0:
     return false
   var item = resolved
@@ -1254,6 +1257,7 @@ proc connectHostTcp*(host: string; port: int): TcpHandle =
   hints.ai_family = 0            # AF_UNSPEC: allow both IPv4 and IPv6
   hints.ai_socktype = SOCK_STREAM
   var resolved: AddrInfoPtr = nil
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   if getaddrinfo(node.toCString(), serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
     return InvalidTcpHandle
   result = connectAddrInfo(resolved)
@@ -1464,6 +1468,7 @@ proc listenTcpOpts*(hostOrderAddr: uint32; port: int; opts: TcpOpts;
   ## needs a bind to fail loudly on a port still in TIME_WAIT can finally say so
   ## by setting `reuseAddr: optOff`.
   report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     note(report, "socket", false)
@@ -1514,6 +1519,7 @@ proc listenTcp6Opts*(port: int; opts: TcpOpts;
   hints.ai_socktype = SOCK_STREAM
   hints.ai_flags = AI_PASSIVE
   var resolved: AddrInfoPtr = nil
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   if getaddrinfo(nil, serv.toCString(), cast[AddrInfoPtr](addr hints), addr resolved) != 0:
     note(report, "getaddrinfo", false)
     return InvalidTcpHandle
@@ -1563,6 +1569,7 @@ proc connectTcp4Opts*(hostOrderAddr: uint32; port: int; opts: TcpOpts;
   ## *before* `connect`, which is the only point at which SO_RCVBUF/SO_SNDBUF
   ## and a local bind can still take effect.
   report = TcpOptsReport(applied: 0, failed: 0, firstFailure: "")
+  initTcp()  # Winsock must be up before any resolver/socket call; idempotent
   let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
   if fd == InvalidTcpHandle:
     note(report, "socket", false)
