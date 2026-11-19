@@ -1,3 +1,5 @@
+> **Moved.** This library now lives in [aoughwl/std](https://github.com/aoughwl/std/tree/main/tcp) (directory `tcp/`), with its full history. This repository is kept as a redirect; new work happens in `aoughwl/std`.
+
 # tcp
 
 Native, blocking TCP primitives for [Nimony](https://github.com/nim-lang/nimony) —
